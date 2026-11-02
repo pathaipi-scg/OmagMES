@@ -71,3 +71,6 @@ build/
 
 run_dev.bat
 CLAUDE.md
+
+# Excel reports - local only
+/doc/Oct26/
