@@ -7,10 +7,9 @@
 
 **DONE — Approved target architecture recorded.** React + TypeScript + Vite frontend → FastAPI REST API → Microsoft SQL Server database `OMAG`, new application schema `omagmes`; legacy `dbo` is read-only. Project target: `D:\AI\OmagMES`; reference: `D:\AI\FittingMES`.
 
-- No application files are present in the OmagMES root at this checkpoint; the repository contains `.env`, `.gitignore`, `.venv`, `doc/`, `docs/`, and `skill/`.
-- No React, FastAPI or database implementation is claimed complete.
-- Tests performed: inspected the project root and Git state. Existing uncommitted changes are listed below and must be preserved.
-- Limitation: the exact installed dependency/runtime state for frontend/backend will be inspected before choosing installation steps.
+- The React + TypeScript + Vite frontend and mock-only FastAPI REST prototype are implemented. The API remains isolated from SQL Server and stores mock state in process memory.
+- Workflow discovery, review-only SQL drafts, UI reference mapping, and project handoff documentation are present. SQL migrations remain unexecuted and production writes are disabled.
+- Existing uncommitted changes are listed below and must be preserved. No files in FittingMES were modified; no commit or push was made.
 
 ## Confirmed Business Rules
 
@@ -75,20 +74,37 @@
 - Wet Reject must dynamically discover/represent `cntR*` counters and exclude `R*` button states; verify actual reason definitions and mappings before finalizing master data.
 - AutoRun is not written into Wet Run Log classifications. For prototype, provide deterministic mock suggestions and visibly label them; no raw legacy data writes.
 
+## FittingMES UI Reference and OmagMES Adaptation
+
+**DONE — FittingMES frontend patterns inspected and documented before the React UI edits.** See [OmagMES_FittingMES_UI_Reference.md](OmagMES_FittingMES_UI_Reference.md) for the source inventory, mapped design patterns, OmagMES menu map, and deliberate differences.
+
+**FittingMES source files referenced:**
+
+- `D:/AI/FittingMES/app/templates/navigation.html` — horizontal Production / Depallet / Setting groups, expandable compact subnav, selected route and retained context.
+- `D:/AI/FittingMES/app/templates/api_base.html` — shared header, no-sidebar shell, compact gray-blue panels/forms/tables, focus and status styling.
+- `D:/AI/FittingMES/app/templates/production.html` — selected Lot and editable table with explicit Save/status.
+- `D:/AI/FittingMES/app/templates/reject.html` — context-first Reject form, explicit save/edit/cancel and saved-entry table.
+- `D:/AI/FittingMES/app/templates/logger.html` and `logger_summary.html` — compact event entry, status, history and separate summary view.
+- `D:/AI/FittingMES/app/templates/mould.html` — filter/list/detail/history layout and confirm-before-lifecycle controls.
+- `D:/AI/FittingMES/app/templates/press_mc.html` and `logger_master.html` — master list/detail and read-only review-table patterns. FittingMES Press/machine data and behavior were not ported.
+
+**UI changes completed:** replaced OmagMES's fixed sidebar and dashboard-style green/rounded visual treatment with FittingMES's compact horizontal, three-group tab navigation and gray-blue operator layout; grouped Production, Wet Run Log, Wet Reject, Wet OEE and Curing under Production; Depallet under Depallet; Mould and Settings under Setting. Curing is placed with the production-related Usage analogue, while Wet Reject remains with the Wet workflow. Kept all OmagMES workflows in React, retained selected Lot ID/context in app state, added read-only Product/standard and dynamic reject-counter review tables to Settings, changed Wet Reject's suggestion action to explicit RECAL wording, added confirmation before Mould lifecycle transitions, and differentiated success from validation messages accessibly. Existing AutoCal/review/edit/explicit SAVE and Lot rename dialog behavior remains.
+
+**Remaining UI differences:** OmagMES is a single-page React application, so it switches content without FittingMES's server-rendered route/date refresh; OmagMES has a simulated Wet OEE and explicit Curing workflow that FittingMES does not provide; Product/Color Run/Lot selection replaces FittingMES's plans and machine assignments; Mould uses OmagMES Product/Press Drops rules. Settings master views are read-only because authoritative data and approvals are pending. These differences are intentional and are not production workflow approvals.
+
 ## Testing and Validation Results
 
 **DONE — Unit/API tests, static migration-draft checks, frontend build, and browser smoke checks.**
 
-- Confirmed OmagMES root has no frontend/backend source directories at this checkpoint.
-- Confirmed existing branch is `main` and uncommitted work exists; do not overwrite or revert.
-- Backend tests: **14 passed** (including mock-only health, AutoCal no-autosave/edit/save, `cntR*` validation, manual Run Log, simulated OEE, original Lot ID, Product/Color transitions, Lot rename audit, Mould return-age behavior, and migration draft ID/Rectime/rollback checks).
-- Frontend production build: `npm run build` **passed**.
-- Browser smoke check: local API and Vite loaded; navigation, AutoCal suggestion preview, Wet Reject, manual Run Log, Wet OEE simulation, and Mould approved-return mock were exercised. An initial stale-backend reload caused a temporary Mould view error; restarting backend with the current code resolved it and the recondition return displayed Current Age reset with Lifetime Age unchanged.
+- Backend tests after UI changes: **15 passed** (one Starlette/httpx deprecation warning); includes mock API lifecycle behavior and static review-only migration checks.
+- Frontend production build after UI changes: `npm run build` **passed** (TypeScript and Vite).
+- Browser smoke check: new horizontal group/subnav navigation, Production, Wet Reject, Curing, Depallet, Mould and Settings pages render; Lot #502 remained selected after switching from Production to Wet Reject. Mould's new lifecycle confirmation appeared and was canceled without a request. Settings Product/standard and reject-counter tables are read-only and visibly unapproved. At a narrow viewport the page width was checked after fixing table overflow; wide tables remain contained in their scroll wrappers.
+- Previous browser smoke checks cover AutoCal no-autosave, manual Wet Run Log, simulated Wet OEE, Product/Color Lot transitions, Lot rename, and Mould recondition behavior. UI-only session used fallback data with API offline; no production API or SQL was connected.
 - Pytest emitted a Starlette deprecation warning about its `httpx` test client integration; tests passed. No SQL Server syntax/runtime validation was performed.
 
 ## Files Created or Modified
 
-**Created in this session:** this progress/handoff document before implementation; workflow mapping; schema gate; README; mock FastAPI modules/tests; React/Vite frontend; and review-only forward/validation/rollback SQL drafts.
+**Created in this session:** this progress/handoff document before implementation; workflow mapping; schema gate; README; mock FastAPI modules/tests; React/Vite frontend; review-only forward/validation/rollback SQL drafts; and the FittingMES UI reference record.
 
 **Implementation files:**
 
@@ -96,6 +112,8 @@
 - `backend/tests/` API and review-draft static checks.
 - `backend/requirements.txt`.
 - `frontend/` React/Vite/TypeScript app and npm lockfile.
+- `frontend/src/fittingmes-ui.css` FittingMES-inspired shell/control styling; navigation and read-only master review are implemented in `frontend/src/App.tsx`.
+- [OmagMES_FittingMES_UI_Reference.md](OmagMES_FittingMES_UI_Reference.md) records the inspected FittingMES source files and pattern mapping.
 - `db/review-only/` version 001 SQL review drafts; never executed.
 - `.gitignore` extended for generated Node dependencies.
 - [README.md](../README.md) contains local run/test steps and safety scope.
@@ -128,13 +146,17 @@ No existing code or source workbook was overwritten.
 
 ## Next Actions
 
-1. Review the React/FastAPI prototype with factory stakeholders and resolve the documented schema/source gates.
-2. Reconcile/verify the SQL endpoint and explicitly authorized read-only scope before any database connection.
-3. Review the SQL drafts with the DBA and owner; run only in a disposable non-production target after separate approval. Never run the rollback draft against a populated schema.
-4. Add authenticated actor identity and database-backed persistence only after explicit approval and migration acceptance.
-5. Continue test/acceptance coverage for AutoCal boundaries, camera attribution, manual time classification, Lot corrections, and Mould counter gaps.
-6. Preserve all existing uncommitted repository changes; do not commit or push.
+1. Review the FittingMES-inspired OmagMES prototype with operators and collect feedback on the compact horizontal menu, Production/Depallet/Setting grouping, table density, and mobile/tablet behavior.
+2. Refine presentation only against verified FittingMES patterns; do not copy FittingMES machine, line, plan, database, or event assumptions.
+3. Keep Product/standard and reject-reason views read-only until authoritative sources and approvals are documented.
+4. Separately resolve the SQL host mismatch, owner/DBA approvals, schema gate, and non-production test plan before any database access or integration work.
+5. Add authentication/database-backed persistence only after explicit approval; keep SQL migrations unexecuted until separately authorized.
+6. Preserve all remaining local-only ignored files and historical workbooks; do not stage them.
 
 ## Resume From Here
 
-**Current next step:** present the mock-only prototype and review-only SQL package for stakeholder review. The FittingMES mapping and full application prototype are complete; 14 backend/static tests pass, Vite builds, and key screens passed browser smoke checks. No database connection or SQL execution occurred; the configured host mismatch, owner decisions, database review, and production authorization remain blockers. All work remains uncommitted/unpushed; preserve every listed pre-existing change.
+**Commit record:** This Phase 1 prototype/UI update is being committed on `main` with subject `feat: complete OmagMES Phase 1 prototype and FittingMES-style UI`, based on `2440878`. The resulting commit hash is reported in the completion handoff; embedding a commit's own hash in its contents would change that hash.
+
+**Current next step:** gather operator feedback on the FittingMES-inspired UI and refine only against verified patterns. The source mapping is in [OmagMES_FittingMES_UI_Reference.md](OmagMES_FittingMES_UI_Reference.md). Build passes and 15 backend/static tests pass; navigation, Lot context retention, responsive table containment, Settings master review, and canceling a Mould confirmation were browser-checked. Intentional differences remain the React SPA/date handling, OmagMES Run/Lot and Wet-line processes, simulated OEE/Curing, and read-only unapproved master tables. No FittingMES files, database connection, or SQL migration was changed or used. Preserve ignored local configuration, virtual environments, build dependencies, and historical Excel workbooks.
+
+**Commit metadata:** `feat: complete OmagMES Phase 1 prototype and FittingMES-style UI` on `main`, based on `2440878`; the resulting hash and push outcome are reported after commit.

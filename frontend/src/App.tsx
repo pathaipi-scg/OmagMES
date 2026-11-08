@@ -12,14 +12,14 @@ type Oee = { mode: string; window: string; availability: number; performance: nu
 type Page = 'Production' | 'Wet Reject' | 'Wet Run Log' | 'Wet OEE' | 'Curing' | 'Depallet' | 'Mould' | 'Settings';
 const API = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000';
 const pages: { name: Page; icon: string; group: string }[] = [
-  { name: 'Production', icon: '◫', group: 'OPERATIONS' },
-  { name: 'Wet Reject', icon: '◈', group: 'OPERATIONS' },
-  { name: 'Wet Run Log', icon: '◷', group: 'OPERATIONS' },
-  { name: 'Wet OEE', icon: '◌', group: 'INSIGHTS' },
-  { name: 'Curing', icon: '▤', group: 'LIFECYCLE' },
-  { name: 'Depallet', icon: '▦', group: 'LIFECYCLE' },
-  { name: 'Mould', icon: '▰', group: 'LIFECYCLE' },
-  { name: 'Settings', icon: '⚙', group: 'SYSTEM' },
+  { name: 'Production', icon: '◫', group: 'Production' },
+  { name: 'Wet Run Log', icon: '◷', group: 'Production' },
+  { name: 'Wet Reject', icon: '◈', group: 'Production' },
+  { name: 'Wet OEE', icon: '◌', group: 'Production' },
+  { name: 'Curing', icon: '▤', group: 'Production' },
+  { name: 'Depallet', icon: '▦', group: 'Depallet' },
+  { name: 'Mould', icon: '▰', group: 'Setting' },
+  { name: 'Settings', icon: '⚙', group: 'Setting' },
 ];
 const fallback: Bootstrap = {
   mode: 'MOCK ONLY — API not connected',
@@ -51,6 +51,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 function App() {
   const [page, setPage] = useState<Page>('Production');
+  const [openNavGroup, setOpenNavGroup] = useState('Production');
   const [data, setData] = useState<Bootstrap>(fallback);
   const [connected, setConnected] = useState(false);
   const [notice, setNotice] = useState('');
@@ -159,7 +160,7 @@ function App() {
   async function createLot(event: FormEvent) {
     event.preventDefault();
     const result = await act<Lot>('/api/lots', { product_id: Number(newProduct), previous_lot_id: Number(selectedLot), transition: lotTransition, color: newColor, lot_name: newLotName });
-    if (result) { setNewLotName(''); setSelectedLot(String(result.id)); setPage('Production'); }
+    if (result) { setNewLotName(''); setSelectedLot(String(result.id)); setPage('Production'); setOpenNavGroup('Production'); }
   }
 
   async function saveLotRename(event: FormEvent) {
@@ -172,6 +173,9 @@ function App() {
   async function saveMouldTransition(event: FormEvent) {
     event.preventDefault();
     const action = mouldAction;
+    const mould = data.moulds.find((item) => String(item.id) === selectedMould);
+    const label = action === 'SEND_TO_RECONDITION' ? 'send to recondition' : 'approve return from recondition';
+    if (!window.confirm(`Confirm ${label} for ${mould?.code ?? `Mould #${selectedMould}`}?`)) return;
     const result = await act(`/api/moulds/${selectedMould}/transition`, { action, reason: mouldReason });
     if (result) {
       setMouldReason('');
@@ -213,7 +217,7 @@ function App() {
 
     if (page === 'Wet Reject') return <>
       <PageIntro eyebrow="WET LINE · QUALITY" title="Wet Reject" subtitle="Dynamic counter suggestions are reviewed and explicitly saved per Lot." />
-      <div className="callout"><span className="callout-icon">◈</span><div><strong>Counts use cntR* only</strong><p>Binary R* button states are excluded. This screen uses mock counters and a dynamic reason list.</p></div><button className="button dark" onClick={() => void loadAutoCal()}>Refresh suggestions</button></div>
+      <div className="callout"><span className="callout-icon">◈</span><div><strong>Counts use cntR* only</strong><p>Binary R* button states are excluded. This screen uses mock counters and a dynamic reason list.</p></div><button className="button dark" onClick={() => void loadAutoCal()}>REJECT RECAL · SUGGESTION</button></div>
       <div className="grid two-col top-gap"><section className="card form-card"><div className="card-head"><div><span className="eyebrow">REVIEW & SAVE</span><h3>Reject reason quantities</h3></div><span className="tag muted">MOCK DATA</span></div>{lotSelector()}<form onSubmit={saveReject}><div className="reason-list">{data.reject_reasons.map((reason, index) => <label className="reason-row" key={reason.code}><span className="reason-num">{String(index + 1).padStart(2, '0')}</span><span className="reason-label"><strong>{reason.label}</strong><small>{reason.code}</small></span><input aria-label={`${reason.code} quantity`} type="number" min="0" value={rejectCounts[reason.code] ?? ''} onChange={(event) => setRejectCounts((current) => ({ ...current, [reason.code]: event.target.value }))} placeholder="0" /></label>)}</div><label className="field top-gap"><span>Operator note</span><input value={rejectNote} onChange={(event) => setRejectNote(event.target.value)} placeholder="Optional review context" /></label><div className="form-footer"><span className="subtle tiny">No balancing or auto-classification.</span><button className="button primary" type="submit">Save reject review →</button></div></form></section>
         <section className="card"><span className="eyebrow">SOURCE CHECK</span><h3>Suggestion snapshot</h3><div className="metric-big">{autoCal?.reject_total ?? '—'} <small>mock rejects</small></div><p className="subtle">The counter values are displayed as a suggestion. The operator owns the final edited quantities.</p><div className="source-lines">{data.reject_reasons.map((reason) => <div key={reason.code}><span>{reason.label}<small>{reason.code}</small></span><strong>{autoCal?.suggested_wet_rejects[reason.code] ?? 'Not loaded'}</strong></div>)}</div><div className="notice-box">Reason names are demonstration labels, not an approved Reject Reason Master.</div><h4 className="section-label">SAVED MOCK REVIEWS</h4>{data.reject_entries.length ? data.reject_entries.slice().reverse().map((entry, i) => <div className="saved-chip" key={String(entry.id ?? i)}>Lot #{String(entry.lot_id)} · total {String(entry.total)}</div>) : <div className="empty-state compact">No reject records saved yet.</div>}</section></div>
     </>;
@@ -247,10 +251,51 @@ function App() {
   }
 
   return <div className="app-shell">
-    <aside className="sidebar"><div className="brand"><div className="brand-mark">O<span>·</span></div><div><strong>OMAG<span>MES</span></strong><small>FACTORY REVIEW</small></div></div><div className="plant-card"><span className="plant-symbol">⌂</span><div><small>FACILITY</small><strong>OMAG · WET LINE</strong></div><span className="pulse"/></div><nav aria-label="Main navigation">{['OPERATIONS', 'INSIGHTS', 'LIFECYCLE', 'SYSTEM'].map((group) => <div className="nav-group" key={group}><span className="nav-label">{group}</span>{pages.filter((item) => item.group === group).map((item) => <button key={item.name} title={item.name} aria-label={item.name} className={`nav-item ${page === item.name ? 'active' : ''}`} onClick={() => { setPage(item.name); setNotice(''); }}><span className="nav-icon">{item.icon}</span>{item.name}{page === item.name && <span className="nav-arrow">›</span>}</button>)}</div>)}</nav><div className="sidebar-bottom"><div className="mock-badge"><span>●</span><div><strong>Review mode</strong><small>No production writes</small></div></div><div className="user-chip"><div className="avatar">OP</div><div><strong>Demo Operator</strong><small>Factory review</small></div><span>⌄</span></div></div></aside>
-    <main className="main"><header className="topbar"><div className="breadcrumbs">OmagMES <span>/</span> <strong>{page}</strong></div><div className="top-actions"><span className={`connection ${connected ? 'on' : ''}`}><i/> {connected ? 'Mock API connected' : 'API offline'}</span><span className="top-date">◷ &nbsp;08 Nov 2026</span><div className="top-avatar">OP</div></div></header><div className="page-wrap"><div className="review-strip"><span>◉</span> FACTORY REVIEW PROTOTYPE <i/> All entries are mock data; do not use for production decisions.</div>{notice && <div className="toast" role="status">{notice}</div>}{pageContent()}<footer>OMAGMES FACTORY REVIEW <span>·</span> Mock-only prototype <span>·</span> No production database writes</footer></div></main>
+    <main className="main">
+      <header className="topbar">
+        <div className="topbar-identity"><span className="brand-mark">O<span>·</span></span><div><div className="breadcrumbs">OMAGMES <span>/</span> <strong>{page}</strong></div><small>FACTORY REVIEW · WET LINE</small></div></div>
+        <div className="top-actions"><span className={`connection ${connected ? 'on' : ''}`} role="status"><i />{connected ? 'Mock API connected' : 'API offline'}</span><span className="top-date">Production Date&nbsp; 08 Nov 2026</span><div className="top-avatar" aria-label="Demo operator">OP</div></div>
+      </header>
+      <div className="page-wrap">
+        <nav className="fitting-navigation" aria-label="Main navigation">
+          <div className="fitting-tabs-main">
+            {['Production', 'Depallet', 'Setting'].map((group) => {
+              const groupPages = pages.filter((item) => item.group === group);
+              const active = groupPages.some((item) => item.name === page);
+              return <button key={group} type="button" className={`fitting-group-tab ${active ? 'is-active' : ''} ${openNavGroup === group ? 'is-open' : ''}`} aria-expanded={openNavGroup === group} onClick={() => {
+                if (openNavGroup === group) setOpenNavGroup('');
+                else {
+                  setOpenNavGroup(group);
+                  if (!active && groupPages[0]) setPage(groupPages[0].name);
+                }
+                setNotice('');
+              }}>{group.toUpperCase()}</button>;
+            })}
+          </div>
+          {openNavGroup && <div className="fitting-subnav" aria-label={`${openNavGroup} navigation`}>
+            {pages.filter((item) => item.group === openNavGroup).map((item) => <button key={item.name} type="button" className={`fitting-page-tab ${page === item.name ? 'is-current' : ''}`} aria-current={page === item.name ? 'page' : undefined} onClick={() => { setPage(item.name); setNotice(''); }}>{item.name.toUpperCase()}</button>)}
+          </div>}
+        </nav>
+        <div className="review-strip"><span>◉</span> FACTORY REVIEW PROTOTYPE <i /> All entries are mock data; do not use for production decisions.</div>
+        {notice && <div className={`toast ${notice.startsWith('Saved') || notice.startsWith('Suggestions loaded') ? 'success' : 'error'}`} role={notice.startsWith('Saved') || notice.startsWith('Suggestions loaded') ? 'status' : 'alert'} aria-live="polite">{notice}</div>}
+        {pageContent()}
+        {page === 'Settings' && <MasterDataReview products={data.products} rejectReasons={data.reject_reasons} />}
+        <footer>OMAGMES FACTORY REVIEW <span>·</span> Mock-only prototype <span>·</span> No production database writes</footer>
+      </div>
+    </main>
     {renameTarget !== null && <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setRenameTarget(null); }}><section className="card rename-modal" role="dialog" aria-modal="true" aria-labelledby="rename-title"><button className="modal-close" aria-label="Close" onClick={() => setRenameTarget(null)}>×</button><span className="eyebrow">AUDITED LOTNAME CHANGE · MOCK</span><h3 id="rename-title">Rename Lot #{renameTarget}</h3><p className="subtle">Lot ID and downstream links never change. Duplicate LotNames are allowed.</p><form onSubmit={saveLotRename} className="top-gap"><label className="field"><span>New display name</span><input value={renameName} onChange={(event) => setRenameName(event.target.value)} required /></label><label className="field"><span>Change reason</span><textarea rows={3} value={renameReason} onChange={(event) => setRenameReason(event.target.value)} required placeholder="Explain why the display name is changing" /></label><button className="button primary" type="submit">Save rename history →</button></form></section></div>}
   </div>;
+}
+
+function MasterDataReview({ products, rejectReasons }: { products: Product[]; rejectReasons: Reason[] }) {
+  return <section className="card top-gap" aria-label="OmagMES master data review">
+    <div className="card-head"><div><span className="eyebrow">SETTING · MASTER REVIEW</span><h3>OmagMES reference data</h3></div><span className="tag amber">READ ONLY · NOT APPROVED</span></div>
+    <p className="notice-box">Demo labels only. No source master was imported; Product standards and reject-reason approval remain pending.</p>
+    <div className="grid two-col top-gap">
+      <section aria-label="Product master review"><h4 className="section-label">PRODUCT MASTER & STANDARDS</h4><div className="table-wrap"><table><thead><tr><th>CODE</th><th>PRODUCT</th><th>FAMILY</th><th>PIECES / DROP</th><th>SECONDS / DROP</th><th>STATUS</th></tr></thead><tbody>{products.map((product) => <tr key={product.id}><td className="id-cell">{product.code}</td><td>{product.name}</td><td>{product.family}</td><td>{product.standard_pieces_per_drop ?? 'Not approved'}</td><td>{product.standard_cycle_time_sec ?? 'Not approved'}</td><td><span className="tag amber">DEMO ONLY</span></td></tr>)}</tbody></table></div></section>
+      <section aria-label="Wet reject counter review"><h4 className="section-label">WET REJECT COUNTERS</h4><div className="table-wrap"><table><thead><tr><th>COUNTER</th><th>DEMO LABEL</th><th>SOURCE RULE</th><th>STATUS</th></tr></thead><tbody>{rejectReasons.map((reason) => <tr key={reason.code}><td className="id-cell">{reason.code}</td><td>{reason.label}</td><td>Dynamic cntR* quantity</td><td><span className="tag amber">UNAPPROVED</span></td></tr>)}</tbody></table></div><p className="subtle">Binary R* button states are excluded; counter mappings require owner confirmation.</p></section>
+    </div>
+  </section>;
 }
 
 function PageIntro({ eyebrow, title, subtitle }: { eyebrow: string; title: string; subtitle: string }) {
