@@ -6,7 +6,7 @@
 
 ## Design-revision note (2026-11-04)
 
-The current OmagMES requirement is one shared accumulator that processes Kepware DataLogger observations expected at approximately five-minute intervals. That operating requirement does not alter the historic sample results below: the bounded `PRESS` sample previously reviewed contains denser rows in some periods (roughly 25–48 seconds on the three selected days), long gaps, and decreases at varying times. The source/cadence relationship must therefore be verified before implementation. Do not assume a reset occurs at 07:00. Process observations in event-time order; apply supported nonnegative increments, establish a baseline after an observed decrease/restart, and preserve gaps or reset ambiguity as explicit uncertainty. Do not fabricate missing strokes or apply negative deltas. Mould Age remains separate from the PLC counter's reset behavior and resets only on approved Return from Recondition.
+The current OmagMES requirement is one shared accumulator for the approved ProductCnt feed, expected at approximately five-minute intervals, with a daily reset boundary at 07:00 Asia/Bangkok. That boundary does not alter the historic sample results below: the bounded legacy `PRESS` sample contains denser rows in some periods (roughly 25–48 seconds on the three selected days), long gaps, and decreases at varying times. It has not been proven to be the approved feed. Verify source/time alignment before implementation. Do not sum across the known daily boundary; if its reset observation is missing, preserve uncertainty. Also detect decreases/restarts outside 07:00, establish a baseline, and never apply a negative delta. Do not fabricate missing strokes. Mould Age remains separate from PLC counter resets and resets only on approved Return from Recondition.
 
 ## 1. Access, verified database skill, and limits
 
@@ -57,7 +57,7 @@ These are sample-range results only, not a guarantee of table-wide behavior. Val
 
 ## 4. Observed behavior around 07:00 (historical sample only)
 
-The earlier assumption of a 07:00 reset is superseded by the current confirmed rule: the accumulator must detect actual decreases/resets and must not rely on a fixed-time boundary. The inspected historical database evidence does **not** show a reset at 07:00 on the three consecutive sampled days. Each date has good-quality samples immediately before and after 07:00 with continuous increasing values:
+The current owner-confirmed ProductCnt feed has a 07:00 Asia/Bangkok daily boundary. The inspected legacy `PRESS` sample is not proven to be that feed and does **not** show a reset at 07:00 on the three consecutive sampled days. Each date has good-quality samples immediately before and after 07:00 with continuous increasing values. This mismatch is a source-alignment warning, not a reason to discard the confirmed ProductCnt contract:
 
 | Date | Last shown before 07:00 | First shown after 07:00 | Observed change |
 |---|---|---|---:|
