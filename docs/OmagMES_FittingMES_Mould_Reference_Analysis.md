@@ -4,6 +4,12 @@
 **Scope:** Read-only source review and bounded live SQL Server metadata/data inspection; design recommendations only.  
 **Disposition:** No FittingMES or OmagMES source, configuration, database, or existing design document was modified. Only this requested analysis file is being created.
 
+## Design-revision note (2026-11-04)
+
+This reference report predates owner-confirmed OmagMES rules finalized for the current design review. For OmagMES, **each physical Mould belongs to exactly one Product**; remove the optional many-to-many `ProductMouldCompatibility` / “Mould Settings” capability mapping proposed below. Multiple Moulds may belong to the same Product. Color is a coating variation and is not part of Mould capability or eligibility. Product or Color changes create a new Lot; a Mould change alone does not.
+
+The legacy counter recommendation below also predates the new shared-accumulator requirement. Do not treat 07:00 as a required reset boundary. The accumulator must process the approximately five-minute Kepware DataLogger observations in timestamp order, establish a new baseline when an actual decrease/reset is observed, never apply a negative delta, and mark gaps/reset ambiguity as uncertain. The earlier live sample evidence remains valid for its bounded sample and shows faster rows in places; actual logger cadence and source alignment must be confirmed. These current owner-confirmed rules supersede conflicting OmagMES recommendations in Sections 8–10; FittingMES findings remain evidence about FittingMES only.
+
 ## 1. Scope, access and evidence labels
 
 Verified project paths:
@@ -45,7 +51,8 @@ Both specify for new tables an opaque `id bigint IDENTITY(1,1)` primary key, `Re
 
 ### OmagMES
 
-- [docs/OmagMES_Database_Design.md](OmagMES_Database_Design.md) — current logical design, including `Mould`, optional `ProductMouldCompatibility`, and `MouldUseEvent` candidates.
+- [docs/OmagMES_Database_Design.md](OmagMES_Database_Design.md) — revised logical design with one Product per Mould, Color-driven Lot boundaries, and shared counter accumulation.
+- [docs/OmagMES_Proposed_Database_DDL_Review.md](OmagMES_Proposed_Database_DDL_Review.md) — proposed SQL Server DDL for review only; not executable or approved.
 - [docs/OmagMES_Confirmed_Business_Rules.md](OmagMES_Confirmed_Business_Rules.md) — confirmed Lot/Product/line rules and unresolved mould requirements.
 - [docs/OmagMES_Database_Assessment.md](OmagMES_Database_Assessment.md) — design assessment and implementation boundary.
 
@@ -147,7 +154,7 @@ The checked-in migration `023_product_family_id.sql` defines the current composi
 
 | Topic | FittingMES reference behavior | OmagMES requirement/adaptation |
 |---|---|---|
-| Product capability | One Product pair in each Mould master. | One Mould may support multiple approved Products; use a separate Mould Settings/capability relation. Validate exact Product ID and effective approval. Never add Mould-to-Color capability. |
+| Product association | One Product pair in each FittingMES Mould master. | Each OmagMES Mould belongs to exactly one Product. Store one `ProductID` FK on `Mould`; do not create a many-to-many Mould/Product capability table. Multiple Moulds may reference the same Product. Color is not a Mould attribute or eligibility dimension. |
 | Lot boundary | Fitting Press Production is attached to an existing Lot; Mould selection is assignment data. | Keep Omag's rule: new Lot for Product shape or coating Color change; pause without either change retains Lot. Mould change alone does not split a Lot. Mould-use intervals must link to the Lot and production Run. |
 | Age source | Sum of entered `MouldUsage.UsageCycles` (from `CounterQty`). | Count Press strokes from read-only `OMAG.dbo.PRESS` history, specifically `OPC.OMAG.OMAG.PRESS.ProductCnt`. Do not treat strokes as finished quantity or multiply by pieces per stroke for mould life. |
 | Usage grain | One usage row per PressProduction; no explicit start/end interval or counter sample FK. | Capture actual Mould-use intervals and reconcile counter samples to intervals; retain raw source reference, source timestamp, value and quality. |
@@ -159,45 +166,39 @@ The checked-in migration `023_product_family_id.sql` defines the current composi
 
 These are recommendations, not implemented schema. Use the existing OmagMES logical model's `ProductionRun`, `ProductionLot`, `Mould`, and `MouldUseEvent` concepts, with the changes below.
 
-### Mould Master and Product capability settings
+### Mould Master and Product assignment
 
 - **Mould Master:** immutable surrogate ID, independently registered Mould Number/business code with a unique constraint, name/serial/description as appropriate, current status, registration/retirement metadata, and current recondition-cycle pointer. Number issuance must be database-controlled and concurrency-safe; never derive identity from Product, Color, LotName, or a numeric ID's meaning.
-- **Mould Product Capability / Mould Settings:** separate MouldID-to-ProductID mapping with active/approved status, effective dates where required, approval actor/time/reason, and history. Enforce one active row per exact Mould/Product mapping and prevent conflicting effective periods. Settings do not include Color. Do not infer capabilities from historical usage or code shape.
+- **Product assignment:** store exactly one authoritative `ProductID` FK on each Mould. Multiple Mould rows may reference the same Product. Do not add a Mould-to-Product capability/junction table or Mould-to-Color relationship. Validate the Mould's one Product against the Lot's Product on the server when recording use.
 - **Registration:** resolve the Product and optional metadata against authoritative masters on the server; generate a unique Mould Number in a transaction; create initial status-history record atomically. Decide whether newly registered tools are immediately eligible or require a commissioning/approval state.
 
 ### Status and recondition workflow
 
 - Keep explicit `ACTIVE`, `RECONDITION`, `RETIRED`, `DENIED` semantics if owners approve those exact labels. Production eligibility is `ACTIVE` only. Restrict transition commands on the server; recondition is a dedicated workflow, not a generic status edit.
-- Record append-only status events with MouldID, old/new status, event type, actor ID, timestamp, and required reason. Audit Mould metadata and Product-capability changes separately.
+- Record append-only status events with MouldID, old/new status, event type, actor ID, timestamp, and required reason. Audit Mould metadata and its single Product assignment separately.
 - Recondition history should preserve the send event and approved return as auditable lifecycle facts. Store cycle number, sent-at/date, approved-return-at/date, actors, reason/service reference, and CurrentAge/LifetimeAge snapshots at send and return where useful. Do not silently overwrite prior event values.
 - Only an approved return advances the cycle/reset boundary. Keep the servicing cycle frozen while status is `RECONDITION`; after return the new Current Age is zero and Lifetime Age remains the sum across all cycles. Retired/Denied reactivation must be explicitly permitted/audited; reactivation must not clear either age.
 
 ### Mould-use intervals and Press counter history
 
-- Represent each Mould assignment/use as a time interval linked by IDs to Mould, ProductionRun, and original ProductionLot, with start/end event times and actor/source. A change to another Mould closes one interval and opens another in the same Run/Lot when Product and Color are unchanged. Product/Color changes follow Omag's separate Run/Lot boundary rules.
-- Treat `OMAG.dbo.PRESS` as a read-only legacy source. Do not update it, reset it, or add application ownership of its rows. In the Omag namespace, ingest/reference eligible samples using the stable source row identity if one exists, tag name, `_TIMESTAMP`, `_VALUE`, and `_QUALITY`; deduplicate by source identity or a documented stable composite. Preserve raw value/time/quality for audit.
-- Maintain a stroke allocation/life ledger whose additive rows are idempotent and attributable to a Mould-use interval and recondition cycle. A derived summary may expose Current Age and Lifetime Age, but the ledger—not a manually editable total—is the basis. Avoid storing both a cumulative total and its constituent increments as independently additive facts.
-- On every Mould assignment change and approved recondition return, capture/associate a trustworthy counter sample at the boundary when operationally possible. An interval needs an explicit start and end counter boundary; samples are matched by event time, not merely by Lot name or daily totals.
+- Store exactly one ProductID on each Mould and link Mould-use intervals to the matching Product Run. Do not use a Mould/Product capability table or any Color mapping. A Mould change closes/opens an interval but does not create a Lot; an interval may span sequential Color Lots, so do not make LotName or LotID the interval identity.
+- Use one shared accumulator for the approximately five-minute Kepware DataLogger observations. Preserve raw source identity, timestamp, value and quality. Keep `OMAG.dbo.PRESS` read-only; its bounded sample cadence differs and must not be assumed to be the same feed until the source mapping is verified.
+- Maintain idempotent ordered counter steps across PLC resets. For a supported nondecreasing pair, apply only its nonnegative delta. When a decrease/restart is observed, record the discontinuity and establish the current reading as a new baseline; never subtract across it, infer a fixed 07:00 reset, or assume an unverified zero baseline. Preserve uncertain gap strokes rather than inventing or interpolating values.
+- Attribute a delta to a Mould-use interval only when observations and interval boundaries support that attribution. Otherwise retain it as unallocated/uncertain. Current Mould Age sums confirmed allocations since the latest approved Return from Recondition; Lifetime Age sums all confirmed allocations and never resets. Color/Lot boundaries and PLC resets do not reset Mould Age.
+- Make ingestion/processing retries idempotent with stable source and pair keys. Any authorized correction must retain the original decision and record its reversal/replacement, actor, reason and evidence. Keep one cumulative accumulator state rebuildable from the observation/step history; do not treat it as a second independent additive ledger.
 
-### Reset-aware calculation and uncertainty controls
-
-- Interpret timestamps in the confirmed `Asia/Bangkok` operating timezone and identify the daily reset boundary at 07:00 local time. Normalize timestamps consistently while retaining source timestamps. Split counter deltas at each reset; do not treat a negative difference across 07:00 as a real negative increment or as a full-day wrap.
-- Within a reset segment, accept only good-quality, ordered samples. For a monotonic same-day pair, the candidate increment is `new_value - old_value`; equal samples contribute zero. A negative same-segment delta is an anomaly requiring a documented reset/rollover decision, not an automatic positive correction.
-- At the daily 07:00 reset, establish a new zero-based segment. A sample after reset can establish the new segment baseline/delta. If the last pre-reset sample is missing or stale, the unknown strokes between that sample and reset must remain explicitly unresolved; do not fabricate them from the new day's value. Counter samples that are stale, bad-quality, duplicated, out of order, or missing should create a visible gap/exception and a lower-confidence or unknown allocation, not an invented number.
-- If a Mould change occurs between two counter samples, the delta spanning those samples cannot be assigned exactly to either Mould. Capture a boundary reading; otherwise retain an unresolved segment for operator/supervisor reconciliation. Do not prorate by elapsed time, production output, or assumed constant speed without an approved rule.
-- Process each source sample pair/reset segment exactly once. Make the ingestion/allocation operation idempotent, enforce unique source identities/segment keys, and use transactional locks around current Run/Mould/cycle assignment and ledger insertion. Store corrections as append-only reversal/adjustment entries referencing the original ledger entry, with actor, reason, and source evidence. Recomputed totals must exclude reversed entries exactly once.
 
 ### Production eligibility validation
 
-On selection and again during the authoritative server-side save transaction, require: registered Mould; current `ACTIVE` state; an active approved Mould Settings mapping for the exact Product ID on the selected Lot; valid effective dates; and no conflicting open Mould-use interval or machine assignment. Serialize concurrent selection/assignment using row/key locks or transaction-scoped application locks plus uniqueness constraints. UI filtering is convenience only. Color is deliberately not a Mould eligibility dimension.
+On selection and again during the authoritative server-side save transaction, require: registered Mould; current `ACTIVE` state; exact equality between the Mould's single `ProductID` and the Lot's Product ID; and no conflicting open Mould-use interval or machine assignment. Serialize concurrent selection/assignment using row/key locks or transaction-scoped application locks plus uniqueness constraints. UI filtering is convenience only. Color is deliberately not a Mould eligibility dimension.
 
 ## 10. Unresolved questions and implementation risks
 
 1. Confirm the authoritative Omag Mould register, Mould Number format/uniqueness scope, identity/serial data, commissioning state, and duplicate-registration policy.
-2. Confirm Product capability approval owner, whether capability is effective-dated, whether a Product may be removed from a Mould, and how historical capability changes are retained.
+2. Confirm the authoritative Product master and controls for assigning exactly one Product to each Mould, including whether reassignment is ever permitted and how historical reassignment is retained.
 3. Confirm who may approve recondition return, whether status changes require separate authorization, the exact status transition matrix, and whether recondition dates are local dates or timestamps.
 4. Confirm how the Press counter is sampled, `_QUALITY` acceptance policy, counter value type/range, stable source-row identity, polling gaps, and availability/retention. The legacy `PRESS` table was not independently inspected in this read-only reference exercise.
-5. Confirm whether `_TIMESTAMP` is local time or UTC and establish exact 07:00 reset semantics (including downtime, daylight/clock changes, and samples exactly at reset).
+5. Confirm whether `_TIMESTAMP` is local time or UTC and identify the actual Kepware DataLogger observation feed and cadence. Do not impose a 07:00 reset rule; the accumulator responds to observed decreases/restarts.
 6. Determine whether counter samples bracket Mould changes closely enough to allocate strokes. Missing pre-reset samples and Mould changes between samples create fundamentally unknowable portions unless operational boundary readings or an approved reconciliation policy exist.
 7. Define correction authorization, evidence, approval, recomputation policy, and whether a historical usage interval may be corrected after downstream production/quality records exist.
 8. Confirm what happens to an active Mould-use interval during a long pause, line stoppage, automatic forklift transfer, or a change of Lot/Color; the Press counter continues independently of Lot and Mould selection.
@@ -208,4 +209,4 @@ On selection and again during the authoritative server-side save transaction, re
 
 ## Review conclusion
 
-FittingMES supplies a working reference for registration, generated numbering, single-Product capability, status/recondition history, derived age, ACTIVE-only production assignment, and in-place production usage reconciliation. Its core age calculation sums manually entered per-assignment `UsageCycles`; it does not solve OmagMES's continuous, daily-reset Press-stroke attribution problem. OmagMES should retain the useful workflow concepts while replacing single-Product storage with explicit Mould Settings, treating counter history as a read-only source, deriving life from reset-aware interval allocations, and preserving correction/audit history. This report is for review before any implementation.
+FittingMES supplies a working reference for registration, generated numbering, single-Product assignment, status/recondition history, derived age, ACTIVE-only production assignment, and in-place production usage reconciliation. Its core age calculation sums manually entered per-assignment `UsageCycles`; it does not solve OmagMES's shared Press-stroke accumulator. OmagMES should retain the useful workflow concepts, assign exactly one Product to each Mould, keep Color independent, accumulate the DataLogger observations idempotently across observed resets, and preserve uncertainty and correction/audit history. This report is for review before any implementation.

@@ -4,6 +4,10 @@
 **Scope:** Read-only examination of `OMAG.dbo.PRESS` for `OPC.OMAG.OMAG.PRESS.ProductCnt`. No database, source code, or existing design document was modified.  
 **Status:** Findings below describe a point-in-time bounded sample, not a complete historical validation or authorization to implement.
 
+## Design-revision note (2026-11-04)
+
+The current OmagMES requirement is one shared accumulator that processes Kepware DataLogger observations expected at approximately five-minute intervals. That operating requirement does not alter the historic sample results below: the bounded `PRESS` sample previously reviewed contains denser rows in some periods (roughly 25–48 seconds on the three selected days), long gaps, and decreases at varying times. The source/cadence relationship must therefore be verified before implementation. Do not assume a reset occurs at 07:00. Process observations in event-time order; apply supported nonnegative increments, establish a baseline after an observed decrease/restart, and preserve gaps or reset ambiguity as explicit uncertainty. Do not fabricate missing strokes or apply negative deltas. Mould Age remains separate from the PLC counter's reset behavior and resets only on approved Return from Recondition.
+
 ## 1. Access, verified database skill, and limits
 
 The OmagMES project path `D:\AI\OmagMES` and its `.env` were verified. Before SQL inspection, the applicable skill was located and read:
@@ -51,9 +55,9 @@ Across the broader bounded range `id 250000..301860`, all 12,740 tag rows had `_
 
 These are sample-range results only, not a guarantee of table-wide behavior. Values are ordered by event timestamp, and `id` breaks ties; timestamp duplicates were not found in the bounded set.
 
-## 4. Observed behavior at the stated 07:00 reset boundary
+## 4. Observed behavior around 07:00 (historical sample only)
 
-The 07:00 requirement is owner-confirmed, but the inspected database evidence does **not** show a reset at 07:00 on the three consecutive sampled days. Each date has good-quality samples immediately before and after 07:00 with continuous increasing values:
+The earlier assumption of a 07:00 reset is superseded by the current confirmed rule: the accumulator must detect actual decreases/resets and must not rely on a fixed-time boundary. The inspected historical database evidence does **not** show a reset at 07:00 on the three consecutive sampled days. Each date has good-quality samples immediately before and after 07:00 with continuous increasing values:
 
 | Date | Last shown before 07:00 | First shown after 07:00 | Observed change |
 |---|---|---|---:|
@@ -61,7 +65,7 @@ The 07:00 requirement is owner-confirmed, but the inspected database evidence do
 | 2026-10-29 | 06:59:44.020, value 1191 | 07:00:13.017, value 1192 | +1 |
 | 2026-10-30 | 06:59:45.997, value 1193 | 07:00:13.997, value 1194 | +1 |
 
-A further bounded 07:00 window on 2026-10-27 showed 06:59:54.703 value 1288 followed by 07:00:19.717 value 1289. Thus, for the sampled records and the timestamps as stored, the observed counter continues through 07:00 rather than restarting there. The timestamp is timezone-naive, so these rows cannot establish whether the recorded clock is Bangkok local time, UTC, or another source time. This must be reconciled with the confirmed 07:00 Asia/Bangkok reset rule before an age calculation is treated as authoritative.
+A further bounded 07:00 window on 2026-10-27 showed 06:59:54.703 value 1288 followed by 07:00:19.717 value 1289. Thus, for the sampled records and the timestamps as stored, the observed counter continues through 07:00 rather than restarting there. The timestamp is timezone-naive, so these rows cannot establish whether the recorded clock is Bangkok local time, UTC, or another source time. This historical evidence does not establish a reset schedule; source time semantics still need confirmation.
 
 Near midnight, the first available rows on 2026-10-28 and 2026-10-29 were values 344 and 472, respectively, and increased from there. This is not evidence of a reset at midnight either; the preceding-day boundary rows were not included in that narrow midnight sample.
 
@@ -100,10 +104,10 @@ Even if a future operator workflow records Mould-change timestamps, if a change 
 The following is a proposed calculation contract; it does not change or write `OMAG.dbo.PRESS`.
 
 1. **Keep the legacy source immutable.** Read samples using the source row `id`, exact `_NAME`, raw `_VALUE`, `_TIMESTAMP`, and `_QUALITY`. Preserve the source identity and raw source fields in any future Omag-owned audit/ledger process; do not write back to the legacy table.
-2. **Resolve time semantics first.** Confirm the PLC/gateway clock basis and prove the 07:00 Asia/Bangkok reset using PLC/OPC configuration or explicit reset events. Convert the timezone-naive timestamp to the agreed zone only after that is established. Current live samples contradict a 07:00 reset when interpreted as stored wall-clock times.
+2. **Resolve time semantics first.** Confirm the PLC/gateway clock basis and distinguish DataLogger observations from the legacy `PRESS` rows. Convert timezone-naive source timestamps only after the clock basis is established. Do not assume or synthesize a reset at 07:00; identify resets from observed counter decreases or independently verified reset events.
 3. **Parse and validate samples.** Accept only numeric, non-NULL values and an owner-approved good-quality set. Order by `_TIMESTAMP, id`, detect duplicates/out-of-order arrival, and retain rejected/anomalous samples for review. Do not sum `_VALUE` readings; they are cumulative-counter snapshots.
-4. **Create counter epochs and deltas.** In a verified reset epoch with monotonic samples, each candidate stroke increment is `current_value - previous_value`. Deduplicate each ordered source-sample pair so retries/reprocessing cannot add a delta twice. A confirmed daily reset starts a new counter epoch/baseline but does **not** reset Mould age. Do not subtract across a reset, and do not invent a full counter wrap.
-5. **Treat unexplained negative deltas as exceptions.** A negative change outside a confirmed reset boundary must stop automatic delta allocation for the affected segment until reset/restart semantics are verified or an authorized correction is approved. In particular, do not automatically add the post-drop value as a complete interval increment when pre-reset activity may be missing.
+4. **Create counter epochs and deltas.** For ordered, valid observations, a supported monotonic pair contributes `current_value - previous_value`. When a decrease/reset/restart is observed, record the discontinuity and establish the new reading as a baseline; never subtract across it or treat the post-reset value as a known increment unless a zero baseline is verified. Deduplicate each ordered source-sample pair so retries/reprocessing cannot add a delta twice. Counter epochs do **not** reset Mould age. Do not invent a full counter wrap.
+5. **Treat decreases and ambiguity explicitly.** Never add a negative delta. An observed decrease starts a new baseline and flags the preceding-to-current interval as uncertain unless reset timing/semantics establish the missing portion. Do not automatically add the post-drop value as a complete interval increment when pre-reset activity may be missing.
 6. **Treat gaps as unknown, not zero or extrapolated.** Define a maximum trusted interval from an owner-approved sampling/operational specification. When a gap exceeds it, mark affected strokes/interval attribution as incomplete. Do not interpolate linearly by elapsed time, output quantity, assumed speed, or Mould lifetime statistics. A first post-reset sample may be counted from zero only if the reset time and zero baseline are independently verified and the sample is known to be the first reliable post-reset reading; otherwise account for the unobserved prefix as unknown.
 7. **Attribute only across known Mould intervals.** Store controlled Mould-use intervals with exact MouldID, ProductID, ProductionRun/Lot references, start/end timestamps, actor/source, and boundary counter sample references. At Mould change, capture a reliable counter boundary reading and atomically close/open intervals. If unavailable, keep the spanning delta unallocated or explicitly uncertain for review; never split it by percentage or guess.
 8. **Separate Mould-life epochs from PLC counter epochs.** Current Age is the sum of confirmed stroke-allocation ledger entries for that Mould since its most recent **approved Return from Recondition**. Lifetime Age is the sum of its confirmed allocations across every recondition cycle. Daily PLC resets only segment the counter-delta calculation; they do not reset Current Age or Lifetime Age. Color changes and new Lots do not reset either age.
@@ -125,16 +129,16 @@ Unknown or disputed stroke portions must be reported as unresolved separately, n
 ## 8. OmagMES relationship to the confirmed design
 
 - One physical line and one main Press remain the only line/Press identities for the initial system.
-- Each Mould is assigned to exactly one Product shape, matching the confirmed FittingMES-style model. Color variations are not separate Products for Mould capability and do not create Mould-to-Color settings.
-- A Mould may be used for approved Product only; production save validates the registered Mould, eligible status, and exact Product association. Capability configuration is controlled by the approved Mould Settings workflow.
+- Each Mould is assigned to exactly one Product shape. Multiple Moulds may be associated with the same Product. Color is independent and is not part of Mould assignment or eligibility; do not create a Mould/Product capability junction or Mould-to-Color settings.
+- Production save validates the registered Mould, eligible status, and exact equality between the Mould's Product and the Lot's Product.
 - Product or coating Color changes create a new Production Lot under the confirmed rules. A pause without either change retains its Lot. Mould changes alone do not manufacture a new Lot; they create a new Mould-use interval.
-- Current Age resets only when an approved Return from Recondition is recorded. Lifetime Age remains cumulative. A 07:00 PLC counter reset is only a counter arithmetic boundary, never a mould-life reset.
+- Current Age resets only when an approved Return from Recondition is recorded. Lifetime Age remains cumulative. Any observed PLC counter reset is only an accumulator baseline boundary, never a Mould-life reset.
 
 These rules are owner-confirmed inputs; the sampled database rows do not independently prove their operational implementation.
 
 ## 9. Unresolved questions and risks before implementation
 
-1. Why do the sampled values continue through 07:00 and then drop to zero at varying times around 07:32–08:01? Confirm actual PLC reset schedule and whether the stored timestamp is local or UTC.
+1. Why do the sampled values continue through 07:00 and then drop to zero at varying times around 07:32–08:01? Confirm reset/restart semantics and whether the stored timestamp is local or UTC; do not assume a fixed 07:00 reset.
 2. Does `_TIMESTAMP` denote source event time, OPC acquisition time, historian write time, or another clock? Is there a separate clock-synchronization/offset specification?
 3. What is the writer policy—on-change, periodic polling, deadband, or hybrid—and what is its configured period/deadband? The table schema and sample sequence cannot answer this conclusively.
 4. What do quality values mean for this OPC server, and are bad/uncertain rows retained, filtered, or omitted? The bounded range showed only 192, not a full historical quality audit.
@@ -148,6 +152,6 @@ These rules are owner-confirmed inputs; the sampled database rows do not indepen
 
 ## Conclusion
 
-The actual table has a clustered identity key but no tag/time index, stores counter values as nullable text and timestamps without timezone, and contains only numeric quality values with no source semantics in the table definition. Bounded samples show dense roughly 25–30 second observations during active periods, multi-hour gaps, no duplicate timestamps in the inspected range, and valid-quality counter decreases. Most importantly, samples on Oct 27–30 do not reset at 07:00 as stored; instead, the 07:00 values continue increasing, while zero resets were seen at variable later times. The confirmed daily reset rule and these observed records must be reconciled before using this source for authoritative mould-age attribution.
+The actual table has a clustered identity key but no tag/time index, stores counter values as nullable text and timestamps without timezone, and contains only numeric quality values with no source semantics in the table definition. Bounded samples show dense roughly 25–30 second observations during active periods, multi-hour gaps, no duplicate timestamps in the inspected range, and valid-quality counter decreases. Samples on Oct 27–30 continue increasing through 07:00 as stored, while zero resets were seen at variable later times. These are historical sample findings only and do not establish the behavior or cadence of the Kepware DataLogger feed required by the current design.
 
 The current legacy history can support qualified counter-delta estimates only where the epoch, data continuity, and Mould interval boundaries are verified. It cannot itself accurately allocate strokes to Moulds at unobserved changes. OmagMES should retain source evidence, segment resets without resetting Mould life, deduplicate every allocated sample-pair delta, and leave missing or ambiguous stroke quantities visibly unresolved. The legacy table must remain read-only and unchanged.

@@ -1,6 +1,6 @@
 # OmagMES Confirmed Manufacturing Business Rules
 
-**Prepared:** 2026-11-03  
+**Prepared:** 2026-11-04  
 **Status:** Consolidated requirements and evidence for plant-owner review. This is not executable schema or implementation approval.  
 **Scope:** OmagMES manufacturing rules and logical model only. Historical Excel files remain unchanged.
 
@@ -30,6 +30,44 @@ The mandatory ID-first standard was verified at [skill/DATABASE_ID_FIRST_DESIGN_
 4. No inference is allowed that a suffix means color, a typing error, or an alias.
 5. Each Production Lot belongs to exactly one Product.
 6. For example, `zcc025010000011` and `zcc025010000011du` remain distinct exact code values until authoritative master-data review establishes their identities. Do not normalize case, strip suffixes, or merge them automatically.
+
+### CONFIRMED — Color and Mould assignment
+
+1. Product identifies the physical product shape; Color identifies an independent coating variation and is not embedded into Product identity by assumption.
+2. A change of Product or Color creates a new Production Lot. A Color change alone does not require a new Product or a new Product-assignment Run; the Lot remains linked to the same Product while its Color changes.
+3. Each physical Mould belongs to exactly one Product. Multiple Moulds may belong to the same Product. Do not create a many-to-many Mould/Product capability table.
+4. Color is not a Mould attribute, capability, or eligibility dimension. A Mould's Product must match the Product of the Lot on which it is used.
+5. A Mould change alone does not create a new Production Run or Lot; record it as a new Mould-use interval.
+
+### CONFIRMED — Product production standards
+
+1. Standard production settings belong to Product, not Mould. A Product may have several physical Moulds; each Mould has its own running number/MouldID and belongs to exactly one Product. Only one Mould is installed at a time; no many-to-many Product/Mould relationship is allowed.
+2. Each Product requires both a positive integer `StandardPiecesPerDrop` (Pieces/Drop) and a positive decimal `StandardCycleTimeSec` (seconds/press Drop). These are independent dimensions; do not infer one from the other or assume identical values across Products.
+3. MouldID identifies the physical tool and supports usage, reconditioning, and Current/Lifetime Age in Press Drops.
+4. One press stroke is one Drop. Drops are not Pieces.
+5. Historical `Std Data` values are evidence for owner review, not approved standards or an authority for backfilling Product Master data. The source labels `Std Data!BC` Cycle Time / Second; the owner-confirmed future basis is seconds per press Drop, but the historical source basis and approval/effective date still need verification. `Std Data!BA` has conflicting stacked labels and is not certified as Pieces/Drop.
+
+### CONFIRMED — Wet production and OEE boundary
+
+1. OMAG Press and Wet Line form one coupled production unit with one Wet Run Log and one Wet OEE.
+2. Dry Line/Depallet is independent. Dry-line downtime is excluded from Wet OEE.
+3. Intended Wet Performance is `ActualDrops × StandardCycleTimeSec / OperatingSeconds`. Wet Quality is `IPCameraWetGoodPieces / (ActualDrops × StandardPiecesPerDrop)`. Availability comes from the Wet Run Log, and OEE is Availability × Performance × Quality. Align Drops, camera counts, standard snapshot, and time to the same Product/Run window; the detailed treatment of mixed Product windows and data exceptions remains subject to owner approval.
+4. Wet Good Pieces are counted by IP Camera records where `line='wet'`; do not substitute Press Drops or HMI Wet Rejects for camera good pieces. HMI Wet Reject records classify reasons and may not account for all calculated losses.
+5. The legacy Excel OEE formula is historical evidence only. It does not override this confirmed Wet OEE model.
+
+### PROPOSED — standard history and production snapshots
+
+1. Keep Product-owned standard revisions with explicit effective periods and approval/source audit. An approved revision contains both positive standard values; prevent overlapping approved periods for one Product.
+2. Freeze the selected standard revision and both numeric values on the relevant Production Run/Lot context. Later master changes must never recalculate completed historical OEE from a mutable current standard.
+3. The owner must decide how a standard effective-date change during an open Run/Lot is applied. Do not silently switch the snapshot or create a new Run/Lot solely for a standards change.
+
+### CONFIRMED — Press counter and Mould age
+
+1. Kepware DataLogger provides Press counter observations at approximately five-minute intervals. Use one shared accumulator for the Press counter; do not build a per-stroke transaction stream.
+2. The raw PLC counter may decrease/reset at times other than 07:00. Detect observed decreases/restarts, never apply a negative delta, and use the new reading as a baseline. Do not assume a fixed reset time.
+3. Process observations in timestamp order and make reprocessing idempotent. Preserve gaps, invalid-quality observations, reset ambiguity, and unbracketed Mould changes as explicit uncertainty; do not invent, interpolate, or silently allocate unknown strokes.
+4. Accumulated Press strokes are not finished-product quantities and must not be used as ProductionOutput, Curing quantity, reject quantity, or OEE counts.
+5. Current Mould Age resets only after approved Return from Recondition. Lifetime Age never resets. PLC counter resets do not reset either Mould-age definition.
 
 ### CONFIRMED — Production Run and Lot boundaries
 
@@ -67,13 +105,17 @@ The mandatory ID-first standard was verified at [skill/DATABASE_ID_FIRST_DESIGN_
 
 **OBSERVED:** The quality workbook's `Std Data` is not verified as the authoritative Product Master. June production sheets and a curing log share some Lot strings, but date/quantity reconciliation is incomplete. Daily dry-output fields overlap production Lot strings, but the reviewed report is not verified as an independent Depallet transaction ledger. No historical workbook evidence authorizes using a LotName to merge rows into one future internal Lot.
 
+**OBSERVED counter qualification:** The separate bounded `OMAG.dbo.PRESS` analysis found roughly 25–48 second sample spacing during selected dense periods, longer gaps, and valid-quality decreases at varying times. This does not establish that `PRESS` is the same feed as the approximately five-minute Kepware DataLogger observations. The source/table alignment, timestamps, quality meaning, and logger cadence require confirmation; the bounded historical sample does not override the confirmed accumulator rules above.
+
+**OBSERVED Product/OEE qualification:** The Jan–Oct Excel formula and standards investigation is documented in [OmagMES_Product_Standards_and_Wet_OEE_Excel_Analysis.md](OmagMES_Product_Standards_and_Wet_OEE_Excel_Analysis.md). `Std Data!BC2` is `Cycle Time`, `BC3` is `Second`, and the cycle-time sheets look up column BC as `STD`; this supports a Product-specific seconds field but does not independently prove the historical value is per press Drop or approved. `Std Data!BA2` labels `ก้อน/Drop` while `BA3` labels `pcs./pallet`; values such as `BA8=45` cannot be certified as Pieces/Drop from that conflicting header stack. Across the ten snapshots, 800 of 855 exact CSV Product Codes appear at least once; 110 of 118 `ObservedInProduction=YES` codes appear. Values and some month snapshots differ. The legacy `OEE_Monitor` Performance is cycle-time/time based, aggregates separate Block/Fence sheets, and does not explicitly use actual Press Drops or IP Camera good pieces. It is not the confirmed Wet Performance definition.
+
 ## 4. Proposed logical interpretation
 
-**PROPOSED:** Keep ProductionRun and ProductionLot as separate tables with a constrained one-to-one relationship for the initial design:
+**PROPOSED:** Keep ProductionRun and ProductionLot as separate tables. One Run represents a continuous line assignment to one Product and may contain multiple sequential Lots when Color changes:
 
-- ProductionRun records the line assignment, start/end period, and continuity through interruptions.
-- ProductionLot is the immutable production/lifecycle identity, owns the single Product association, and has the editable LotName.
-- A Lot is created in the same controlled transaction as its Run. ProductionRun does not duplicate ProductID, and ProductionLot does not duplicate line/run timestamps. Product is resolved through the one-to-one Run/Lot relationship without a second ProductID that could disagree.
+- ProductionRun records the line assignment, one Product, start/end period, and continuity through interruptions.
+- ProductionLot is the immutable production/lifecycle identity, references exactly one Product and one Color variation, and has the editable LotName. Its Product must match the Product on its Run.
+- A Product change closes the current Run and creates a new Run and Lot. A Color change creates a new Lot within the existing Run. ProductionRun may therefore have multiple sequential Lots; each Lot belongs to one Run. Store Product identity once where practical or enforce equality if the chosen SQL Server FK design repeats ProductID; never allow Run/Lot Product mismatch.
 - Shift/date production output rows refer to Lot.id and carry their actual shift/work-date grain. They do not create Run/Lot boundaries. Stoppage events can optionally reference the active Run to document interruption without creating a replacement Lot.
 - CuringEntry, DepalletEvent, and future DispatchLine each reference ProductionLot.id directly. Display names may be shown or snapshotted for human review but are never relationship keys.
 
@@ -90,8 +132,10 @@ erDiagram
     ProductFamily ||--o{ Product : classifies
     Product ||--o{ ProductCodeAssignment : has_controlled_codes
     ProductionLine ||--o{ ProductionRun : runs_on
-    ProductionRun ||--|| ProductionLot : paired_one_to_one
+    ProductionRun ||--|{ ProductionLot : contains_product_lots
     Product ||--o{ ProductionLot : owns_product
+    Color ||--o{ ProductionLot : coats
+    Product ||--o{ Mould : is_the_mould_shape
     ProductionLot ||--o{ ProductionOutput : records
     ProductionOutputType ||--o{ ProductionOutput : classifies
     Shift ||--o{ ProductionOutput : groups_by_shift
@@ -113,7 +157,7 @@ This describes the proposed model, not an implemented schema. Optional equipment
 
 Lot 501 and Lot 503 can both be named `LOT-A01` and belong to Product A while remaining different immutable Lots because a Product B run occurred between them. The system distinguishes the two by `ProductionLot.id`; their Run IDs, production periods, outputs and downstream records remain separately attached. An operator can intentionally reuse a display name, but a Curing/Depallet/Dispatch selection must display Lot ID plus Product and production context and submit only the selected ID. Rename audit history changes the display label, never the ID or foreign keys.
 
-Likewise, pausing Product A for repair and resuming it without switching Product continues the existing Run and Lot. The interruption is recorded against that Run when applicable; neither date/shift boundary nor interruption manufactures a new Lot.
+Likewise, pausing Product A for repair and resuming it without switching Product or Color continues the existing Run and Lot. The interruption is recorded against that Run when applicable; neither date/shift boundary nor interruption manufactures a new Lot. A Color change does create a new Lot, even while the Product Run continues.
 
 ## 7. Unresolved — owner decisions required
 
@@ -124,10 +168,13 @@ Likewise, pausing Product A for repair and resuming it without switching Product
 5. Production output meaning and grain, including planned/gross/good/waste/reject/rework quantities and units; how shift summaries and source corrections are represented.
 6. Curing record grain, room master, loading/unloading semantics, partial transfer behavior, and whether quantities are captured. Historical curing examples do not reconcile quantity.
 7. Depallet event fields, event time, product quantity units, status/reversal, and whether/when reject details are required. The dry-output workbook is not verified as an event ledger.
-8. Mould authoritative register, compatibility validation source, use/change event capture, and service-life/reset requirements.
-9. Downtime/OEE definitions, planned/unplanned mapping, minor-stop threshold, and event overlap/attribution. Existing workbook formulas are not approved KPI rules.
-10. Quality sampling, specification revision, reject/disposition linkage, user identity/authentication source and retention requirements.
-11. Dispatch document/header grain, customer/order identifiers and quantity/reversal rules for the future module.
-12. Historical import source file versioning, exact row-level locator, mapping approval roles, correction/reversal process, and how ambiguous date/Product Code conflicts are escalated.
+8. Product Master authority; resolution of `Std Data!BA2`/`BA3` unit conflict; approval and per-Drop basis for historical `Std Data!BC`; effective dates, precision, approval and correction policy for both Product standards.
+9. Run/Lot standard snapshot structure and the rule for an effective standard change during an open Run/Lot.
+10. Wet Run Log planned/operating-time definitions; same-window alignment of standard, Drops and IP Camera counts; mixed-Product aggregation, missing/zero-denominator eligibility, counter-boundary uncertainty and above-100% review policy. Actual-drop source and shared-accumulator relationship; coupled Press/Wet Line stoppage policy and explicit Dry Line/Depallet exclusion.
+11. Authoritative Mould register, one-Product assignment control, use/change event capture, Mould-drop workbook assignment/ACT meaning and unit, Mould-age cycle model, and recondition approval/reset workflow.
+12. Downtime classification, planned/unplanned mapping, minor-stop threshold, and event overlap/attribution. Existing workbook formulas are not approved KPI rules.
+13. Quality sampling, specification revision, reject/disposition linkage, user identity/authentication source and retention requirements.
+14. Dispatch document/header grain, customer/order identifiers and quantity/reversal rules for the future module.
+15. Historical import source file versioning, exact row-level locator, mapping approval roles, correction/reversal process, and how ambiguous date/Product Code conflicts are escalated.
 
 No item above may be silently inferred from Lot strings, Product Code patterns, workbook directory names, or cached formulas.
