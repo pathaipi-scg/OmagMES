@@ -26,7 +26,10 @@ def setup_function() -> None:
 def test_health_is_mock_only_and_not_connected_to_database() -> None:
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "mode": "mock-only", "database_connected": False}
+    assert response.json()["status"] == "ok"
+    assert response.json()["mode"] == "MOCK"
+    assert response.json()["application_port"] == 3001
+    assert response.json()["database_connected"] is None
 
 
 def test_autocal_is_a_suggestion_until_explicit_save() -> None:
@@ -38,6 +41,9 @@ def test_autocal_is_a_suggestion_until_explicit_save() -> None:
 
 
 def test_operator_can_edit_autocal_values_before_explicit_save() -> None:
+    suggestion = client.get("/api/autocal/preview")
+    assert suggestion.status_code == 200
+    assert suggestion.json()["suggested_actual_drops"] == 820
     response = client.post("/api/production/save", json={"lot_id": 501, "actual_drops": 777, "wet_good_pieces": 701, "operator_note": "Reviewed override"})
     assert response.status_code == 201
     assert response.json()["actual_drops"] == 777

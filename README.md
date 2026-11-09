@@ -4,28 +4,34 @@ React + TypeScript + Vite frontend with a FastAPI REST backend. This is a factor
 
 ## Safety boundary
 
-- **Mock-only API:** all changes live in process memory and are lost when the backend restarts.
-- **No SQL connection:** the backend does not read `.env`, connect to SQL Server, or write to any database.
+- **Mock-only writes:** saves live in process memory and are lost when the backend restarts.
+- **Gated read-only SQL:** live SQL access is disabled unless explicit configuration/approval gates pass. Do not enable it until the endpoint, instance, SELECT-only permissions, and source metadata are verified. No SQL migrations are run by the application.
 - **No production data:** Product names, Lots, counters, reject reasons, and KPI values are explicitly illustrative.
 - **No migrations executed:** legacy `dbo` remains untouched. See [schema implementation gate](docs/OmagMES_Schema_Implementation_Gate.md).
 - Product standard values remain blank because the historical numeric conflicts are unresolved. Do not copy mock values to production.
 
 ## Run locally (Windows PowerShell)
 
-Backend (from repository root):
+Start the backend and frontend with the tracked launcher:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+\.\run_omagmes.bat
 ```
 
-Frontend (in a second terminal):
+The root `.env` and `.env.example` set `APP_PORT=3001`. Vite reads the repository-root `.env` even when started from the `frontend` directory, and falls back to port 3001 if the setting is missing or invalid. The launcher loads `APP_PORT` from the root `.env` before starting either process. FastAPI reads/reports that application setting but remains bound to `127.0.0.1:8000`; Vite listens on `0.0.0.0:$APP_PORT` and proxies `/api` to FastAPI.
+
+Alternatively, run the processes separately:
+
+```powershell
+\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+```
 
 ```powershell
 Set-Location frontend
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173`. The frontend can be configured to use another local API origin with `VITE_API_URL`; the default is `http://127.0.0.1:8000`.
+Open `http://localhost:<APP_PORT>` on the server computer. From another computer, open `http://<server-hostname-or-IP>:<APP_PORT>`; with the checked-in example value this is port 3001. The browser calls the API through the same origin, so no client-side API hostname or CORS setup is required. Vite's development and preview servers bind all interfaces; make sure Windows Firewall/network policy permits inbound TCP `<APP_PORT>`. FastAPI port 8000 is internal and should not be exposed to clients.
 
 ## Validate
 

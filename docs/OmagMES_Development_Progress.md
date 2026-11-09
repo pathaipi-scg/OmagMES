@@ -1,15 +1,25 @@
 # OmagMES Development Progress and Handoff
 
 **Status key:** DONE · IN PROGRESS · PENDING · BLOCKED  
-**Last updated:** 2026-11-08
+**Last updated:** 2026-11-09
 
 ## Project Overview and Approved Architecture
 
 **DONE — Approved target architecture recorded.** React + TypeScript + Vite frontend → FastAPI REST API → Microsoft SQL Server database `OMAG`, new application schema `omagmes`; legacy `dbo` is read-only. Project target: `D:\AI\OmagMES`; reference: `D:\AI\FittingMES`.
 
-- The React + TypeScript + Vite frontend and mock-only FastAPI REST prototype are implemented. The API remains isolated from SQL Server and stores mock state in process memory.
+- The React + TypeScript + Vite frontend and FastAPI REST prototype are implemented. Existing write/save routes remain process-local mock state; an explicitly gated, read-only SQL source adapter is implemented but has not connected to SQL Server and its source schema is unverified.
 - Workflow discovery, review-only SQL drafts, UI reference mapping, and project handoff documentation are present. SQL migrations remain unexecuted and production writes are disabled.
-- Existing uncommitted changes are listed below and must be preserved. No files in FittingMES were modified; no commit or push was made.
+- Phase 2 implementation changes are uncommitted and must be preserved. The workspace HEAD is the requested baseline `599f2657ac962fbcb9a1c786cf7e8d43e1f5c0bc`. No files in FittingMES were modified; no commit or push was made.
+
+## Application Access Port Configuration
+
+**DONE — OmagMES uses root `.env` setting `APP_PORT=3001` as the shared browser-access port (fallback: 3001).**
+
+- Root `.env` and `.env.example` contain `APP_PORT=3001`. Vite explicitly loads the root `.env` even when launched from `frontend/`, validates the value, and uses it for dev/preview listeners on `0.0.0.0`; its fallback is 3001. `/api` requests proxy to FastAPI at `127.0.0.1:8000`, which remains unchanged and loopback-only.
+- The React client uses same-origin relative API paths. FastAPI explicitly loads the root `.env` and reports the application port in `/api/health`; this does not change its internal listening port. Obsolete localhost-only CORS settings were removed.
+- `run_omagmes.bat` loads only `APP_PORT` from the root `.env`, starts FastAPI, waits for `/api/health`, then starts Vite with that environment value. Starting Vite directly from `frontend/` also loads the root `.env`. README documents the launcher and access URLs.
+- Validation on 2026-11-09: direct `npm run dev` from `frontend/` read the root setting and started Vite on port 3001; the launcher started listeners on `0.0.0.0:3001` and `127.0.0.1:8000`. Browser access to `http://10.28.255.98:3001/` loaded the UI, reported API connected, and `/api/health` returned mock-mode JSON through the same origin.
+- Cross-computer access was not tested. Windows Firewall and network ACLs must permit inbound TCP 3001; actual reachability depends on the selected host IP/network route. No SQL Server/Kepware configuration or database connection was changed.
 
 ## Confirmed Business Rules
 
@@ -27,16 +37,17 @@
 
 ## Database Schema and Migration Status
 
-**IN PROGRESS — Review-only migration/validation/rollback drafts are prepared. Production SQL integration is blocked pending endpoint reconciliation, owner/DBA approval, authoritative sources, and schema review.**
+**IN PROGRESS — Review-only migration/validation/rollback drafts are prepared. Read-only Phase 2 source integration is implemented behind explicit gates, but live access and source schema verification are blocked pending endpoint reconciliation, owner/DBA approval, authoritative metadata and policy review.**
 
 - Verified/read full OmagMES skill: [../skill/DATABASE_ID_FIRST_DESIGN_SKILL.md](../skill/DATABASE_ID_FIRST_DESIGN_SKILL.md).
 - Verified/read full FittingMES skill: [../../FittingMES/skill/DATABASE_ID_FIRST_DESIGN_SKILL.md](../../FittingMES/skill/DATABASE_ID_FIRST_DESIGN_SKILL.md).
+- Also read the Pylance `python-fact-grounded-coding` skill at `C:\Users\Administrator\.vscode\extensions\ms-python.vscode-pylance-2026.4.1\skills\python-fact-grounded-coding\SKILL.md` for the Python implementation/validation workflow.
 - Required new-table conventions: `id bigint IDENTITY(1,1) NOT NULL PRIMARY KEY`; `Rectime datetime NOT NULL DEFAULT (GETDATE())`; ID-based FKs, unique business-code attributes, constraints, relevant indexes, safe key resolution, auditable revisions/corrections.
 - Draft package: [review-only SQL drafts](../db/review-only/README.md) contains forward DDL, catalog validation and guarded empty-schema rollback. A static pytest checks ID/Rectime and forward/rollback table parity. These are not DBA-reviewed, SQL Server-parsed, or approved.
-- SQL migrations: **not executed**. No SQL connection was attempted during this implementation session.
+- SQL migrations: **not executed**. No SQL connection was attempted during this implementation session. The new adapter has only been exercised with fake-driver tests.
 - Production database writes: **disabled / not enabled**. No SQL change has been run in this session.
 - Legacy `OMAG.dbo` tables: **not changed**. Any source inspection must remain bounded and read-only.
-- Connection configuration was inspected without exposing credential values; `.env` has host `127.0.0.1`, not owner-specified `10.28.255.98`. No connection/test was attempted and no settings were changed. See [schema implementation gate](OmagMES_Schema_Implementation_Gate.md).
+- Connection configuration was inspected without exposing credential values; `.env` has host `127.0.0.1`, not owner-specified `10.28.255.98`. No connection/test was attempted and no settings were changed. The live adapter rejects this host before any connection attempt. See [schema implementation gate](OmagMES_Schema_Implementation_Gate.md).
 - Schema-critical items remain: authoritative Product/Color/Reject Reason/Mould/User masters; actual `REJECT_WET` mappings; camera source timestamp/identity and duplicate policy; approved Product standards/effective periods; counter feed/time/quality/gap behavior; event grain; permissions and rollback review. No unapproved master or standard seed data.
 
 ## FittingMES Reference Analysis Status
@@ -59,20 +70,23 @@
 
 ## FastAPI Backend and REST API Status
 
-**DONE — Minimal mock-only FastAPI REST API implemented.**
+**DONE — Mock FastAPI REST API implemented; Phase 2 live-source endpoints are present but gated and unverified.**
 
-- Endpoints cover health/bootstrap, Lots and LotName rename, AutoCal preview, production/reject explicit SAVE, manual Wet Run Log events, simulated Wet OEE, Curing/Depallet mock records, and Mould recondition transitions.
-- Routes, business logic and data access should be separated simply. No production SQL writes or live integration are enabled in the prototype.
-- All state is in-process memory, resets at backend restart, and never opens SQL Server or reads `.env`.
+- Mock endpoints cover health/bootstrap, Lots and LotName rename, AutoCal preview, production/reject explicit SAVE, manual Wet Run Log events, simulated Wet OEE, Curing/Depallet mock records, and Mould recondition transitions.
+- `backend/app/sql_source.py` adds explicitly gated, bounded, parameterized SELECT access for approved legacy `PRESS`, `REJECT_WET`, and `product_count` sources, with configured timeouts, target identity and SELECT-only permission preflight, and sanitized failures. Metadata/data queries require review flags. Actual source metadata has not been inspected or approved.
+- Read-only API routes cover source health, Wet status, latest/history ProductCnt, dynamic `cntR*` Reject counters, Wet camera metadata/observations, historian metadata, and a source dashboard. No route writes to SQL; all existing SAVE routes remain mock-only.
+- `backend/app/live_autocal.py` calculates suggestions only from verified PLC quality/timezone/gap settings, uses the confirmed 07:00 Asia/Bangkok reset rule, rejects incomplete/ambiguous intervals, and withholds Wet Camera Lot suggestions unless metadata and boundary/duplicate/quality policies are configured.
+- All mock state remains in-process memory and resets at backend restart. Live mode reads `.env` through `python-dotenv`, but a connection has not been attempted.
 
 ## PLC / IP Camera / HMI AutoCal Status
 
-**DONE — Deterministic suggestions implemented in the mock service; no source integration.**
+**DONE — Mock suggestions remain available; live-read-only AutoCal is implemented behind source and Lot-window approval gates.**
 
 - Prototype AutoCal excludes `CYC`, treats the 07:00 Asia/Bangkok ProductCnt reset as a daily boundary, keeps the first post-reset value as the new daily baseline, and flags mock-source limitations. It does not sum across the reset.
 - Wet Camera `value_cnt` is per observation/tray; inspect timestamp and identity before proposing Lot attribution; conveyor delay at changeovers is unresolved.
-- Wet Reject must dynamically discover/represent `cntR*` counters and exclude `R*` button states; verify actual reason definitions and mappings before finalizing master data.
+- Wet Reject discovers/represents `cntR*` counters and excludes `R*` button states; source counter suggestions remain separate from unapproved demo reason codes and are never silently mapped. Verify actual reason definitions/mappings before finalizing master data.
 - AutoRun is not written into Wet Run Log classifications. For prototype, provide deterministic mock suggestions and visibly label them; no raw legacy data writes.
+- Live Press history selects ProductCnt only. Counter suggestions require a configured positive maximum-gap threshold; missing approval withholds the computed quantity.
 
 ## FittingMES UI Reference and OmagMES Adaptation
 
@@ -94,17 +108,23 @@
 
 ## Testing and Validation Results
 
-**DONE — Unit/API tests, static migration-draft checks, frontend build, and browser smoke checks.**
+**DONE — Phase 1 unit/API tests, static migration-draft checks, frontend build, and browser smoke checks. Phase 2 fake-source tests and frontend build also pass; live SQL is untested.**
 
 - Backend tests after UI changes: **15 passed** (one Starlette/httpx deprecation warning); includes mock API lifecycle behavior and static review-only migration checks.
 - Frontend production build after UI changes: `npm run build` **passed** (TypeScript and Vite).
+- Phase 2 backend validation on the requested baseline: `pytest backend/tests -q` **42 passed**, one Starlette/httpx deprecation warning. The source integration tests use fake drivers; they do not open a SQL connection.
+- Phase 2 frontend validation: `npm run build` **passed** (TypeScript and Vite). Workspace diagnostics report no errors.
+- APP_PORT configuration validation: `pytest backend/tests -q` **42 passed**, including the `APP_PORT` health check; `npm run build` **passed** after Vite root-env loading changes.
+- Port-change validation: `run_omagmes.bat` successfully started FastAPI on loopback `8000`, waited for `/api/health`, then started Vite on `0.0.0.0:3001`. Browser smoke check loaded the app at `http://10.28.255.98:3001/`, showed API connected, and confirmed `/api/health` returned successfully through the same external origin.
+- Current network reachability from a separate workstation was not tested. Host firewall/network ACLs may still block inbound TCP 3001.
+- No live SQL connection, target identity, permission, actual source metadata, or production query has been verified.
 - Browser smoke check: new horizontal group/subnav navigation, Production, Wet Reject, Curing, Depallet, Mould and Settings pages render; Lot #502 remained selected after switching from Production to Wet Reject. Mould's new lifecycle confirmation appeared and was canceled without a request. Settings Product/standard and reject-counter tables are read-only and visibly unapproved. At a narrow viewport the page width was checked after fixing table overflow; wide tables remain contained in their scroll wrappers.
 - Previous browser smoke checks cover AutoCal no-autosave, manual Wet Run Log, simulated Wet OEE, Product/Color Lot transitions, Lot rename, and Mould recondition behavior. UI-only session used fallback data with API offline; no production API or SQL was connected.
 - Pytest emitted a Starlette deprecation warning about its `httpx` test client integration; tests passed. No SQL Server syntax/runtime validation was performed.
 
 ## Files Created or Modified
 
-**Created in this session:** this progress/handoff document before implementation; workflow mapping; schema gate; README; mock FastAPI modules/tests; React/Vite frontend; review-only forward/validation/rollback SQL drafts; and the FittingMES UI reference record.
+**Created in earlier work:** this progress/handoff document; workflow mapping; schema gate; README; mock FastAPI modules/tests; React/Vite frontend; review-only forward/validation/rollback SQL drafts; and the FittingMES UI reference record.
 
 **Implementation files:**
 
@@ -112,6 +132,10 @@
 - `backend/tests/` API and review-draft static checks.
 - `backend/requirements.txt`.
 - `frontend/` React/Vite/TypeScript app and npm lockfile.
+- Phase 2 modified `backend/app/main.py`, `backend/requirements.txt`, `backend/tests/test_api.py`, and `frontend/src/App.tsx` / `frontend/src/main.tsx`; added `backend/app/sql_source.py`, `backend/app/live_autocal.py`, `backend/tests/test_live_sources.py`, and `frontend/src/source-mode.css` / `frontend/src/source-window.css`.
+- Port configuration modified the ignored local `.env` to add only `APP_PORT=3001` (SQL settings preserved), added `.env.example`, and modified `backend/app/main.py`, `backend/tests/test_api.py`, `frontend/src/App.tsx`, `frontend/vite.config.ts`, `frontend/package.json`, and README; added `run_omagmes.bat`.
+- Updated this handoff with Phase 2 scope, validation, exact skill references, blockers, and a safe resume plan.
+- `backend/requirements.txt` now includes `pyodbc`, `python-dotenv`, and `tzdata` for the gated SQL adapter and Windows timezone support.
 - `frontend/src/fittingmes-ui.css` FittingMES-inspired shell/control styling; navigation and read-only master review are implemented in `frontend/src/App.tsx`.
 - [OmagMES_FittingMES_UI_Reference.md](OmagMES_FittingMES_UI_Reference.md) records the inspected FittingMES source files and pattern mapping.
 - `db/review-only/` version 001 SQL review drafts; never executed.
@@ -146,17 +170,13 @@ No existing code or source workbook was overwritten.
 
 ## Next Actions
 
-1. Review the FittingMES-inspired OmagMES prototype with operators and collect feedback on the compact horizontal menu, Production/Depallet/Setting grouping, table density, and mobile/tablet behavior.
-2. Refine presentation only against verified FittingMES patterns; do not copy FittingMES machine, line, plan, database, or event assumptions.
-3. Keep Product/standard and reject-reason views read-only until authoritative sources and approvals are documented.
-4. Separately resolve the SQL host mismatch, owner/DBA approvals, schema gate, and non-production test plan before any database access or integration work.
-5. Add authentication/database-backed persistence only after explicit approval; keep SQL migrations unexecuted until separately authorized.
-6. Preserve all remaining local-only ignored files and historical workbooks; do not stage them.
+1. Obtain owner confirmation of the exact approved SQL host and instance (expected host `10.28.255.98`) and DBA confirmation that the selected login has SELECT-only permissions on the three named source tables. Do not query until both are documented.
+2. Resolve `.env` host `127.0.0.1` versus expected `10.28.255.98`; preserve secrets and do not change environment values without authorization.
+3. After approval, verify target identity/permissions and review actual PRESS, REJECT_WET, and product_count metadata. Approve source timezone, PLC quality codes, counter-gap threshold, camera quality/duplicate/identity/boundary policy, and Lot-window source before enabling corresponding data paths.
+4. Validate only bounded read-only source queries in an approved test window; continue to keep all SAVE actions mock-only and do not execute SQL migrations.
+5. Continue operator review of the prototype; keep demo Lots, standards and Reject Reason mappings visibly unapproved and separate from live source observations.
+6. Preserve local-only ignored files and historical workbooks; do not stage, commit, or push without a separate request.
 
 ## Resume From Here
 
-**Commit record:** This Phase 1 prototype/UI update is being committed on `main` with subject `feat: complete OmagMES Phase 1 prototype and FittingMES-style UI`, based on `2440878`. The resulting commit hash is reported in the completion handoff; embedding a commit's own hash in its contents would change that hash.
-
-**Current next step:** gather operator feedback on the FittingMES-inspired UI and refine only against verified patterns. The source mapping is in [OmagMES_FittingMES_UI_Reference.md](OmagMES_FittingMES_UI_Reference.md). Build passes and 15 backend/static tests pass; navigation, Lot context retention, responsive table containment, Settings master review, and canceling a Mould confirmation were browser-checked. Intentional differences remain the React SPA/date handling, OmagMES Run/Lot and Wet-line processes, simulated OEE/Curing, and read-only unapproved master tables. No FittingMES files, database connection, or SQL migration was changed or used. Preserve ignored local configuration, virtual environments, build dependencies, and historical Excel workbooks.
-
-**Commit metadata:** `feat: complete OmagMES Phase 1 prototype and FittingMES-style UI` on `main`, based on `2440878`; the resulting hash and push outcome are reported after commit.
+**Current state:** Phase 2 read-only SQL integration and source-aware AutoCal are implemented but uncommitted on the requested baseline `599f2657ac962fbcb9a1c786cf7e8d43e1f5c0bc`. OmagMES uses root `.env` `APP_PORT=3001` (fallback 3001) for Vite's `0.0.0.0` listener; FastAPI stays internal at `127.0.0.1:8000`. Direct startup from `frontend/`, launcher startup, same-origin API proxy, 42 backend tests, frontend build, and browser network-interface URL were verified. One Starlette/httpx deprecation warning remains. Cross-computer access still depends on firewall/network policy. `.env` was changed only to add APP_PORT; SQL configuration is untouched. No SQL connection was attempted; source schema, target identity, and permissions remain unverified. Do not commit/push or access SQL until separately requested/authorized and owner/DBA gates are resolved. No FittingMES files were changed.

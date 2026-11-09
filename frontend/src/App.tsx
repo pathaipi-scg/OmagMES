@@ -6,11 +6,13 @@ type Reason = { code: string; label: string };
 type Mould = { id: number; code: string; product_id: number; status: string; current_age_drops: number; lifetime_age_drops: number; recondition_cycle: number };
 type RecordRow = Record<string, unknown>;
 type Bootstrap = { mode: string; products: Product[]; lots: Lot[]; reject_reasons: Reason[]; production_entries: RecordRow[]; reject_entries: RecordRow[]; run_events: RecordRow[]; curing_entries: RecordRow[]; depal_entries: RecordRow[]; moulds: Mould[]; mould_history: RecordRow[] };
-type AutoCal = { mode: string; suggested_actual_drops: number; suggested_wet_good_pieces: number; suggested_wet_rejects: Record<string, number>; reject_total: number; source_notes: string[] };
+type AutoCal = { mode: string; suggested_actual_drops: number | null; suggested_wet_good_pieces: number | null; suggested_wet_rejects: Record<string, number | null>; reject_total?: number | null; source_notes: string[]; source_errors?: Record<string, string> };
 type Oee = { mode: string; window: string; availability: number; performance: number; quality: number; oee: number; actual_drops: number; wet_good_pieces: number; standard_status: string; notes: string[] };
+type SourceMode = 'MOCK' | 'LIVE READ-ONLY' | 'UNKNOWN';
+type SourceHealth = { mode: string; connected: boolean; server: string | null; instance: string | null; database: string | null; read_only_permissions_verified: boolean; error: string | null };
+type SourceDashboard = { mode: string; connected: boolean; wet_status: { status: string; observation: RecordRow | null } | null; press_counter: RecordRow | null; wet_camera_pieces: number | null; wet_reject_counts: Record<string, number | null>; last_observation_at: string | null; warnings: string[]; source_errors: Record<string, string> };
 
 type Page = 'Production' | 'Wet Reject' | 'Wet Run Log' | 'Wet OEE' | 'Curing' | 'Depallet' | 'Mould' | 'Settings';
-const API = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000';
 const pages: { name: Page; icon: string; group: string }[] = [
   { name: 'Production', icon: '◫', group: 'Production' },
   { name: 'Wet Run Log', icon: '◷', group: 'Production' },
@@ -41,7 +43,7 @@ const fallback: Bootstrap = {
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } });
+  const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } });
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { detail?: string } | null;
     throw new Error(body?.detail ?? `Request failed (${response.status})`);
@@ -54,6 +56,12 @@ function App() {
   const [openNavGroup, setOpenNavGroup] = useState('Production');
   const [data, setData] = useState<Bootstrap>(fallback);
   const [connected, setConnected] = useState(false);
+  const [sourceMode, setSourceMode] = useState<SourceMode>('UNKNOWN');
+  const [sourceHealth, setSourceHealth] = useState<SourceHealth | null>(null);
+  const [sourceDashboard, setSourceDashboard] = useState<SourceDashboard | null>(null);
+  const [liveWindowStart, setLiveWindowStart] = useState('');
+  const [liveWindowEnd, setLiveWindowEnd] = useState('');
+  const [liveWindowConfirmed, setLiveWindowConfirmed] = useState(false);
   const [notice, setNotice] = useState('');
   const [autoCal, setAutoCal] = useState<AutoCal | null>(null);
   const [oee, setOee] = useState<Oee | null>(null);
@@ -83,12 +91,35 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [boot, status] = await Promise.all([request<Bootstrap>('/api/bootstrap'), request<{ status: string }>('/api/health')]);
+      const [boot, status] = await Promise.all([request<Bootstrap>('/api/bootstrap'), request<{ status: string; mode: SourceMode }>('/api/health')]);
       setData(boot);
       setConnected(status.status === 'ok');
+      setSourceMode(status.mode === 'MOCK' || status.mode === 'LIVE READ-ONLY' ? status.mode : 'UNKNOWN');
       setSelectedLot((current) => boot.lots.some((lot) => String(lot.id) === current) ? current : String(boot.lots[0]?.id ?? ''));
+      if (status.mode === 'LIVE READ-ONLY') {
+        try {
+          const health = await request<SourceHealth>('/api/sources/health');
+          setSourceHealth(health);
+          if (health.connected) {
+            const now = Date.now();
+            const query = new URLSearchParams({ start_at: new Date(now - 86_400_000).toISOString(), end_at: new Date(now).toISOString() });
+            setSourceDashboard(await request<SourceDashboard>(`/api/sources/dashboard?${query.toString()}`));
+          } else {
+            setSourceDashboard(null);
+          }
+        } catch (error) {
+          setSourceHealth({ mode: 'LIVE READ-ONLY', connected: false, server: null, instance: null, database: null, read_only_permissions_verified: false, error: error instanceof Error ? error.message : 'Source health is unavailable.' });
+          setSourceDashboard(null);
+        }
+      } else {
+        setSourceHealth(null);
+        setSourceDashboard(null);
+      }
     } catch {
       setConnected(false);
+      setSourceMode('UNKNOWN');
+      setSourceHealth({ mode: 'UNKNOWN', connected: false, server: null, instance: null, database: null, read_only_permissions_verified: false, error: 'API unavailable; active source mode cannot be verified.' });
+      setSourceDashboard(null);
     }
   }, []);
 
@@ -109,7 +140,7 @@ function App() {
     setNotice('');
     try {
       const result = await request<T>(path, body === undefined ? { method } : { method, body: JSON.stringify(body) });
-      setNotice('Saved to mock session. No production database was changed.');
+      setNotice('Saved to process-local mock state. No production SQL was changed.');
       await refresh();
       return result;
     } catch (error) {
@@ -121,15 +152,27 @@ function App() {
   async function loadAutoCal() {
     setNotice('');
     try {
-      const result = await request<AutoCal>('/api/autocal/preview');
+      const result = await request<AutoCal>(autocalPath());
       setAutoCal(result);
-      setDrops(String(result.suggested_actual_drops));
-      setGoodPieces(String(result.suggested_wet_good_pieces));
-      setRejectCounts(Object.fromEntries(Object.entries(result.suggested_wet_rejects).map(([key, value]) => [key, String(value)])));
-      setNotice('Suggestions loaded for review. Nothing has been saved.');
+      if (result.suggested_actual_drops !== null) setDrops(String(result.suggested_actual_drops));
+      if (result.suggested_wet_good_pieces !== null) setGoodPieces(String(result.suggested_wet_good_pieces));
+      if (result.mode !== 'LIVE READ-ONLY') {
+        const availableRejects = Object.fromEntries(Object.entries(result.suggested_wet_rejects).filter(([, value]) => value !== null).map(([key, value]) => [key, String(value)]));
+        if (Object.keys(availableRejects).length) setRejectCounts((current) => ({ ...current, ...availableRejects }));
+      }
+      setNotice(`${result.mode} suggestions loaded for review. Nothing has been saved.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not load suggestions.');
     }
+  }
+
+  function autocalPath() {
+    if (sourceMode !== 'LIVE READ-ONLY') return '/api/autocal/preview';
+    if (!selectedLotData) throw new Error('Select a Lot before requesting LIVE READ-ONLY AutoCal.');
+    if (!liveWindowConfirmed || !liveWindowStart || !liveWindowEnd) throw new Error('Enter and confirm the selected Lot time window before requesting live AutoCal.');
+    if (Intl.DateTimeFormat().resolvedOptions().timeZone !== 'Asia/Bangkok') throw new Error('Set the workstation timezone to Asia/Bangkok before selecting the Lot window.');
+    const query = new URLSearchParams({ lot_id: String(selectedLotData.id), start_at: new Date(liveWindowStart).toISOString(), end_at: new Date(liveWindowEnd).toISOString(), window_confirmed: 'true' });
+    return `/api/autocal/preview?${query.toString()}`;
   }
 
   async function saveProduction(event: FormEvent) {
@@ -190,10 +233,16 @@ function App() {
     })}</select></label>;
   }
 
+  function liveWindowControls() {
+    if (sourceMode !== 'LIVE READ-ONLY') return null;
+    return <section className="source-window-entry" aria-label="Confirm Lot time window"><strong>Lot-window confirmation required</strong><p>Lot records remain mock-only. Use the verified production start/end for this Lot; unconfirmed windows will not produce live suggestions.</p><div className="grid two-col"><label className="field"><span>Lot window start · Asia/Bangkok</span><input type="datetime-local" value={liveWindowStart} onChange={(event) => { setLiveWindowStart(event.target.value); setLiveWindowConfirmed(false); }} /></label><label className="field"><span>Lot window end · Asia/Bangkok</span><input type="datetime-local" value={liveWindowEnd} onChange={(event) => { setLiveWindowEnd(event.target.value); setLiveWindowConfirmed(false); }} /></label></div><label className="source-confirm-check"><input type="checkbox" checked={liveWindowConfirmed} onChange={(event) => setLiveWindowConfirmed(event.target.checked)} /><span>I verified this time window for the selected Lot. This does not save quantities.</span></label></section>;
+  }
+
   function pageContent() {
     if (page === 'Production') return <>
       <div className="hero-row"><div><div className="eyebrow">WET LINE · LIVE WORKSPACE</div><h2>Production entry</h2><p className="subtle">Review AutoCal suggestions, correct them if needed, then save deliberately.</p></div><button className="button secondary" onClick={() => { setNewLotName(''); setPage('Settings'); }}>＋ New Run / Lot</button></div>
-      <div className="callout"><span className="callout-icon">✦</span><div><strong>AutoCal is suggestion-only</strong><p>PLC and camera values are mocked. Operator edits and explicit SAVE are required.</p></div><button className="button dark" onClick={() => void loadAutoCal()}>Load AutoCal</button></div>
+      <div className="callout"><span className="callout-icon">✦</span><div><strong>AutoCal is suggestion-only</strong><p>{sourceMode === 'LIVE READ-ONLY' ? 'Live source observations remain read-only. Enter and confirm the Lot time window; explicit SAVE remains mock-only.' : 'PLC and camera values are mocked. Operator edits and explicit SAVE are required.'}</p></div><button className="button dark" onClick={() => void loadAutoCal()}>{sourceMode === 'LIVE READ-ONLY' ? 'Load LIVE AutoCal' : 'Load AutoCal'}</button></div>
+      {liveWindowControls()}
       <div className="grid two-col top-gap">
         <section className="card form-card"><div className="card-head"><div><span className="eyebrow">PRODUCTION RECORD</span><h3>Confirm quantities</h3></div><span className="tag muted">MOCK ENTRY</span></div>
           {lotSelector()}
@@ -203,7 +252,7 @@ function App() {
             <label className="field"><span>Operator note / override reason</span><input value={productionNote} onChange={(event) => setProductionNote(event.target.value)} placeholder="Required for a manual override in production" /></label>
             <div className="form-footer"><span className="subtle tiny">This button saves only to process-local mock state.</span><button className="button primary" type="submit">Save production entry <span>→</span></button></div>
           </form>
-          {autoCal && <details className="source-details"><summary>AutoCal source notes · suggestion not saved</summary><ul>{autoCal.source_notes.map((note) => <li key={note}>{note}</li>)}</ul><div className="code-row">Dynamic reject counters: {Object.entries(autoCal.suggested_wet_rejects).map(([key, value]) => <span key={key}>{key}: {value}</span>)}</div></details>}
+          {autoCal && <details className="source-details"><summary>{autoCal.mode} · AutoCal notes · suggestion not saved</summary><ul>{autoCal.source_notes.map((note) => <li key={note}>{note}</li>)}</ul>{autoCal.source_errors && Object.entries(autoCal.source_errors).map(([source, error]) => <p className="source-error" key={source}>{source}: {error}</p>)}<div className="code-row">Counter suggestions: {Object.entries(autoCal.suggested_wet_rejects).map(([key, value]) => <span key={key}>{key}: {value ?? 'Not verified'}</span>)}</div></details>}
         </section>
         <section className="card"><div className="card-head"><div><span className="eyebrow">CURRENT CONTEXT</span><h3>Run overview</h3></div><span className="status-dot">● RUNNING · DEMO</span></div>
           <div className="context-grid"><div><small>Product</small><strong>{selectedProduct?.code ?? '—'}</strong></div><div><small>Color</small><strong>{selectedLotData?.color ?? '—'}</strong></div><div><small>Run ID</small><strong>#{selectedLotData?.run_id ?? '—'}</strong></div><div><small>Selected Lot ID</small><strong>#{selectedLotData?.id ?? '—'}</strong></div></div>
@@ -217,9 +266,11 @@ function App() {
 
     if (page === 'Wet Reject') return <>
       <PageIntro eyebrow="WET LINE · QUALITY" title="Wet Reject" subtitle="Dynamic counter suggestions are reviewed and explicitly saved per Lot." />
-      <div className="callout"><span className="callout-icon">◈</span><div><strong>Counts use cntR* only</strong><p>Binary R* button states are excluded. This screen uses mock counters and a dynamic reason list.</p></div><button className="button dark" onClick={() => void loadAutoCal()}>REJECT RECAL · SUGGESTION</button></div>
+      <div className="callout"><span className="callout-icon">◈</span><div><strong>Counts use cntR* only</strong><p>Binary R* button states are excluded. {sourceMode === 'LIVE READ-ONLY' ? 'Live counter data is suggestion-only; SAVE remains mock-only.' : 'This screen uses mock counters and a dynamic reason list.'}</p></div><button className="button dark" onClick={() => void loadAutoCal()}>REJECT RECAL · SUGGESTION</button></div>
       <div className="grid two-col top-gap"><section className="card form-card"><div className="card-head"><div><span className="eyebrow">REVIEW & SAVE</span><h3>Reject reason quantities</h3></div><span className="tag muted">MOCK DATA</span></div>{lotSelector()}<form onSubmit={saveReject}><div className="reason-list">{data.reject_reasons.map((reason, index) => <label className="reason-row" key={reason.code}><span className="reason-num">{String(index + 1).padStart(2, '0')}</span><span className="reason-label"><strong>{reason.label}</strong><small>{reason.code}</small></span><input aria-label={`${reason.code} quantity`} type="number" min="0" value={rejectCounts[reason.code] ?? ''} onChange={(event) => setRejectCounts((current) => ({ ...current, [reason.code]: event.target.value }))} placeholder="0" /></label>)}</div><label className="field top-gap"><span>Operator note</span><input value={rejectNote} onChange={(event) => setRejectNote(event.target.value)} placeholder="Optional review context" /></label><div className="form-footer"><span className="subtle tiny">No balancing or auto-classification.</span><button className="button primary" type="submit">Save reject review →</button></div></form></section>
-        <section className="card"><span className="eyebrow">SOURCE CHECK</span><h3>Suggestion snapshot</h3><div className="metric-big">{autoCal?.reject_total ?? '—'} <small>mock rejects</small></div><p className="subtle">The counter values are displayed as a suggestion. The operator owns the final edited quantities.</p><div className="source-lines">{data.reject_reasons.map((reason) => <div key={reason.code}><span>{reason.label}<small>{reason.code}</small></span><strong>{autoCal?.suggested_wet_rejects[reason.code] ?? 'Not loaded'}</strong></div>)}</div><div className="notice-box">Reason names are demonstration labels, not an approved Reject Reason Master.</div><h4 className="section-label">SAVED MOCK REVIEWS</h4>{data.reject_entries.length ? data.reject_entries.slice().reverse().map((entry, i) => <div className="saved-chip" key={String(entry.id ?? i)}>Lot #{String(entry.lot_id)} · total {String(entry.total)}</div>) : <div className="empty-state compact">No reject records saved yet.</div>}</section></div>
+        <section className="card"><span className="eyebrow">SOURCE CHECK</span><h3>Suggestion snapshot</h3><div className="metric-big">{autoCal?.reject_total ?? '—'} <small>mock preview only</small></div><p className="subtle">{sourceMode === 'LIVE READ-ONLY' ? 'Live cntR* tags are separate cumulative counters. They are shown in source notes only and are not mapped to these mock reason fields.' : 'The counter values are displayed as a suggestion. The operator owns the final edited quantities.'}</p><div className="source-lines">{data.reject_reasons.map((reason) => <div key={reason.code}><span>{reason.label}<small>{reason.code}</small></span><strong>{sourceMode === 'LIVE READ-ONLY' ? 'No approved mapping' : autoCal?.suggested_wet_rejects[reason.code] ?? 'Not loaded'}</strong></div>)}</div>
+          {autoCal && <details className="source-details"><summary>{autoCal.mode} · source counter suggestions · not saved</summary><ul>{autoCal.source_notes.map((note) => <li key={note}>{note}</li>)}</ul>{Object.entries(autoCal.suggested_wet_rejects).map(([tag, value]) => <div className="saved-chip" key={tag}>{tag}: {value ?? 'Not verified'}</div>)}</details>}
+          <div className="notice-box">Reason names are demonstration labels, not an approved Reject Reason Master.</div><h4 className="section-label">SAVED MOCK REVIEWS</h4>{data.reject_entries.length ? data.reject_entries.slice().reverse().map((entry, i) => <div className="saved-chip" key={String(entry.id ?? i)}>Lot #{String(entry.lot_id)} · total {String(entry.total)}</div>) : <div className="empty-state compact">No reject records saved yet.</div>}</section></div>
     </>;
 
     if (page === 'Wet Run Log') return <>
@@ -244,17 +295,18 @@ function App() {
     if (page === 'Curing' || page === 'Depallet') {
       const isCuring = page === 'Curing';
       const entries = isCuring ? data.curing_entries : data.depal_entries;
-      return <><PageIntro eyebrow={`LIFECYCLE · ${isCuring ? 'CURING' : 'DEPALLET'}`} title={`${page} records`} subtitle="Every operation retains the original immutable Production Lot ID."/><div className="notice-box strong-notice">Demo screen only. Event grain and quantity units are not approved; sample values are not source records.</div><div className="grid two-col top-gap"><section className="card form-card"><div className="card-head"><div><span className="eyebrow">NEW MOCK RECORD</span><h3>{isCuring ? 'Add curing entry' : 'Add depallet event'}</h3></div><span className="tag muted">REVIEW ONLY</span></div><form onSubmit={(event) => void saveLifecycle(event, isCuring ? 'curing' : 'depallet')}>{lotSelector()}<label className="field"><span>Quantity <em>placeholder only; unit unresolved</em></span><input type="number" min="0" value={lifecycleQty} onChange={(event) => setLifecycleQty(event.target.value)} placeholder="Leave blank / zero for demo" /></label><label className="field"><span>Note</span><textarea rows={3} value={lifecycleNote} onChange={(event) => setLifecycleNote(event.target.value)} placeholder="Do not enter production data"/></label><div className="form-footer"><span className="subtle tiny">References selected Lot ID #{selectedLot || '—'}.</span><button className="button primary" type="submit">Save mock record →</button></div></form></section><section className="card"><span className="eyebrow">TRACEABILITY</span><h3>Original Lot identity</h3><div className="trace-card"><div className="trace-icon">{isCuring ? '◉' : '▦'}</div><div><small>UPSTREAM PRODUCTION LOT</small><strong>#{selectedLotData?.id ?? '—'} · {selectedLotData?.lot_name ?? 'No lot selected'}</strong><span>{selectedProduct?.code ?? '—'} · {selectedLotData?.color ?? '—'}</span></div></div><div className="divider"/><h4 className="section-label">RECENT {page.toUpperCase()} RECORDS</h4>{entries.length ? entries.slice().reverse().map((entry, index) => <div className="record-row" key={String(entry.id ?? index)}><span className="record-mark">↗</span><div><strong>Lot #{String(entry.lot_id)} · qty {String(entry.quantity)}</strong><small>{String(entry.note ?? 'Demo record')}</small></div><span className="tag amber">MOCK</span></div>) : <div className="empty-state compact">No records in this mock session.</div>}</section></div></>;
+      return <><PageIntro eyebrow={`LIFECYCLE · ${isCuring ? 'CURING' : 'DEPALLET'}`} title={`${page} records`} subtitle="Every operation retains the original immutable Production Lot ID."/><div className="notice-box strong-notice">Demo screen only. Event grain and quantity units are not approved; sample values are not source records.</div><div className="grid two-col top-gap"><section className="card form-card"><div className="card-head"><div><span className="eyebrow">NEW MOCK RECORD</span><h3>{isCuring ? 'Add curing entry' : 'Add depallet event'}</h3></div><span className="tag muted">REVIEW ONLY</span></div><form onSubmit={(event) => void saveLifecycle(event, isCuring ? 'curing' : 'depallet')}>{lotSelector()}
+<label className="field"><span>Quantity <em>placeholder only; unit unresolved</em></span><input type="number" min="0" value={lifecycleQty} onChange={(event) => setLifecycleQty(event.target.value)} placeholder="Leave blank / zero for demo" /></label><label className="field"><span>Note</span><textarea rows={3} value={lifecycleNote} onChange={(event) => setLifecycleNote(event.target.value)} placeholder="Do not enter production data"/></label><div className="form-footer"><span className="subtle tiny">References selected Lot ID #{selectedLot || '—'}.</span><button className="button primary" type="submit">Save mock record →</button></div></form></section><section className="card"><span className="eyebrow">TRACEABILITY</span><h3>Original Lot identity</h3><div className="trace-card"><div className="trace-icon">{isCuring ? '◉' : '▦'}</div><div><small>UPSTREAM PRODUCTION LOT</small><strong>#{selectedLotData?.id ?? '—'} · {selectedLotData?.lot_name ?? 'No lot selected'}</strong><span>{selectedProduct?.code ?? '—'} · {selectedLotData?.color ?? '—'}</span></div></div><div className="divider"/><h4 className="section-label">RECENT {page.toUpperCase()} RECORDS</h4>{entries.length ? entries.slice().reverse().map((entry, index) => <div className="record-row" key={String(entry.id ?? index)}><span className="record-mark">↗</span><div><strong>Lot #{String(entry.lot_id)} · qty {String(entry.quantity)}</strong><small>{String(entry.note ?? 'Demo record')}</small></div><span className="tag amber">MOCK</span></div>) : <div className="empty-state compact">No records in this mock session.</div>}</section></div></>;
     }
 
-    return <><PageIntro eyebrow="SYSTEM · FACTORY REVIEW" title="Settings & data status" subtitle="Prototype controls and explicit boundaries for factory review."/><div className="simulation-banner"><span>⚠</span><div><strong>MOCK ONLY — NO DATABASE CONNECTION</strong><p>Every API save is process-local and is lost when the backend restarts.</p></div></div><div className="grid two-col top-gap"><section className="card"><span className="eyebrow">DEMO LOT CREATION</span><h3>Start a new Product or Color assignment</h3><p className="subtle">Product change creates a new demo Run and Lot; Color change creates a Lot in the existing Run. Production authorization and standard snapshots require review.</p><form onSubmit={createLot}>{lotSelector()}<label className="field"><span>Transition type</span><select value={lotTransition} onChange={(event) => setLotTransition(event.target.value as 'PRODUCT_CHANGE' | 'COLOR_CHANGE')}><option value="PRODUCT_CHANGE">Product change · new Run + Lot</option><option value="COLOR_CHANGE">Color change · same Run, new Lot</option></select></label><label className="field"><span>Product</span><select value={newProduct} onChange={(event) => setNewProduct(event.target.value)}>{data.products.map((product) => <option key={product.id} value={product.id}>{product.code} · {product.name}</option>)}</select></label><div className="grid two-col"><label className="field"><span>Color</span><input value={newColor} onChange={(event) => setNewColor(event.target.value)} /></label><label className="field"><span>Display LotName</span><input value={newLotName} onChange={(event) => setNewLotName(event.target.value)} placeholder="Duplicate names are allowed" required /></label></div><button className="button primary" type="submit">Create mock Lot →</button></form></section><section className="card"><span className="eyebrow">CONNECTION & APPROVAL GATES</span><h3>Not configured for production</h3><div className="check-list">{['SQL target does not match the current local environment configuration', 'Legacy dbo remains read-only and unmodified', 'No migration has been executed', 'Product standards / reason masters are not approved', 'Authentication and operator audit identity are not configured'].map((item) => <div key={item}><span>!</span>{item}</div>)}</div><div className="notice-box">No credentials are displayed or used by the prototype. See the schema implementation gate in project docs.</div></section></div><div className="grid three-col top-gap"><StatCard label="SQL database" value="DISCONNECTED" tone="amber"/><StatCard label="Backend mode" value={connected ? 'MOCK API' : 'OFFLINE'} tone={connected ? 'green' : 'amber'}/><StatCard label="Write capability" value="MOCK ONLY" tone="blue"/></div></>;
+    return <><PageIntro eyebrow="SYSTEM · FACTORY REVIEW" title="Settings & data status" subtitle="Prototype controls and explicit boundaries for factory review."/><div className="simulation-banner"><span>⚠</span><div><strong>{sourceMode === 'LIVE READ-ONLY' ? 'LIVE READ-ONLY SOURCES · MOCK SAVES' : 'MOCK ONLY — NO DATABASE CONNECTION'}</strong><p>Every API save is process-local and is lost when the backend restarts.</p></div></div><div className="grid two-col top-gap"><section className="card"><span className="eyebrow">DEMO LOT CREATION</span><h3>Start a new Product or Color assignment</h3><p className="subtle">Product change creates a new demo Run and Lot; Color change creates a Lot in the existing Run. Production authorization and standard snapshots require review.</p><form onSubmit={createLot}>{lotSelector()}<label className="field"><span>Transition type</span><select value={lotTransition} onChange={(event) => setLotTransition(event.target.value as 'PRODUCT_CHANGE' | 'COLOR_CHANGE')}><option value="PRODUCT_CHANGE">Product change · new Run + Lot</option><option value="COLOR_CHANGE">Color change · same Run, new Lot</option></select></label><label className="field"><span>Product</span><select value={newProduct} onChange={(event) => setNewProduct(event.target.value)}>{data.products.map((product) => <option key={product.id} value={product.id}>{product.code} · {product.name}</option>)}</select></label><div className="grid two-col"><label className="field"><span>Color</span><input value={newColor} onChange={(event) => setNewColor(event.target.value)} /></label><label className="field"><span>Display LotName</span><input value={newLotName} onChange={(event) => setNewLotName(event.target.value)} placeholder="Duplicate names are allowed" required /></label></div><button className="button primary" type="submit">Create mock Lot →</button></form></section><section className="card"><span className="eyebrow">CONNECTION & APPROVAL GATES</span><h3>Not configured for production</h3><div className="check-list">{['SQL target does not match the current local environment configuration', 'Legacy dbo remains read-only and unmodified', 'No migration has been executed', 'Product standards / reason masters are not approved', 'Authentication and operator audit identity are not configured'].map((item) => <div key={item}><span>!</span>{item}</div>)}</div><div className="notice-box">Credentials are never displayed. Live access remains blocked until the approved endpoint, instance, SELECT-only permissions, source metadata, and timestamp policies are explicitly verified.</div></section></div><div className="grid three-col top-gap"><StatCard label="SQL database" value={sourceHealth?.connected ? 'LIVE · READ ONLY' : sourceMode === 'MOCK' ? 'MOCK MODE' : 'NOT CONNECTED'} tone={sourceHealth?.connected ? 'green' : 'amber'}/><StatCard label="Backend mode" value={sourceMode} tone={sourceMode === 'LIVE READ-ONLY' ? 'blue' : sourceMode === 'MOCK' ? 'green' : 'amber'}/><StatCard label="Write capability" value="MOCK ONLY" tone="blue"/></div></>;
   }
 
   return <div className="app-shell">
     <main className="main">
       <header className="topbar">
         <div className="topbar-identity"><span className="brand-mark">O<span>·</span></span><div><div className="breadcrumbs">OMAGMES <span>/</span> <strong>{page}</strong></div><small>FACTORY REVIEW · WET LINE</small></div></div>
-        <div className="top-actions"><span className={`connection ${connected ? 'on' : ''}`} role="status"><i />{connected ? 'Mock API connected' : 'API offline'}</span><span className="top-date">Production Date&nbsp; 08 Nov 2026</span><div className="top-avatar" aria-label="Demo operator">OP</div></div>
+        <div className="top-actions"><span className={`source-mode-badge ${sourceMode === 'LIVE READ-ONLY' ? 'live' : sourceMode === 'MOCK' ? 'mock' : 'unknown'}`} role="status">{sourceMode}</span><span className={`connection ${connected ? 'on' : ''}`}><i />{connected ? 'API connected' : 'API offline'}</span><span className="top-date">Production Date&nbsp; 08 Nov 2026</span><div className="top-avatar" aria-label="Demo operator">OP</div></div>
       </header>
       <div className="page-wrap">
         <nav className="fitting-navigation" aria-label="Main navigation">
@@ -276,11 +328,12 @@ function App() {
             {pages.filter((item) => item.group === openNavGroup).map((item) => <button key={item.name} type="button" className={`fitting-page-tab ${page === item.name ? 'is-current' : ''}`} aria-current={page === item.name ? 'page' : undefined} onClick={() => { setPage(item.name); setNotice(''); }}>{item.name.toUpperCase()}</button>)}
           </div>}
         </nav>
-        <div className="review-strip"><span>◉</span> FACTORY REVIEW PROTOTYPE <i /> All entries are mock data; do not use for production decisions.</div>
-        {notice && <div className={`toast ${notice.startsWith('Saved') || notice.startsWith('Suggestions loaded') ? 'success' : 'error'}`} role={notice.startsWith('Saved') || notice.startsWith('Suggestions loaded') ? 'status' : 'alert'} aria-live="polite">{notice}</div>}
+        <div className="review-strip"><span>◉</span> SOURCE MODE: {sourceMode} <i /> {sourceMode === 'LIVE READ-ONLY' ? 'SQL reads are live/read-only; displayed Lots, reject reasons, and entry forms remain mock context. SAVE is mock-only; no Lot attribution or reason mapping is verified.' : sourceMode === 'MOCK' ? 'Mock sources and process-local saves; do not use for production decisions.' : 'Source mode unavailable; no live values are displayed.'}</div>
+        <SourceStatusPanel mode={sourceMode} health={sourceHealth} dashboard={sourceDashboard} />
+        {notice && <div className={`toast ${notice.startsWith('Saved') || notice.toLowerCase().includes('suggestions loaded') ? 'success' : 'error'}`} role={notice.startsWith('Saved') || notice.toLowerCase().includes('suggestions loaded') ? 'status' : 'alert'} aria-live="polite">{notice}</div>}
         {pageContent()}
         {page === 'Settings' && <MasterDataReview products={data.products} rejectReasons={data.reject_reasons} />}
-        <footer>OMAGMES FACTORY REVIEW <span>·</span> Mock-only prototype <span>·</span> No production database writes</footer>
+        <footer>OMAGMES FACTORY REVIEW <span>·</span> {sourceMode} sources <span>·</span> Saves remain process-local mock state</footer>
       </div>
     </main>
     {renameTarget !== null && <div className="modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setRenameTarget(null); }}><section className="card rename-modal" role="dialog" aria-modal="true" aria-labelledby="rename-title"><button className="modal-close" aria-label="Close" onClick={() => setRenameTarget(null)}>×</button><span className="eyebrow">AUDITED LOTNAME CHANGE · MOCK</span><h3 id="rename-title">Rename Lot #{renameTarget}</h3><p className="subtle">Lot ID and downstream links never change. Duplicate LotNames are allowed.</p><form onSubmit={saveLotRename} className="top-gap"><label className="field"><span>New display name</span><input value={renameName} onChange={(event) => setRenameName(event.target.value)} required /></label><label className="field"><span>Change reason</span><textarea rows={3} value={renameReason} onChange={(event) => setRenameReason(event.target.value)} required placeholder="Explain why the display name is changing" /></label><button className="button primary" type="submit">Save rename history →</button></form></section></div>}
@@ -295,6 +348,32 @@ function MasterDataReview({ products, rejectReasons }: { products: Product[]; re
       <section aria-label="Product master review"><h4 className="section-label">PRODUCT MASTER & STANDARDS</h4><div className="table-wrap"><table><thead><tr><th>CODE</th><th>PRODUCT</th><th>FAMILY</th><th>PIECES / DROP</th><th>SECONDS / DROP</th><th>STATUS</th></tr></thead><tbody>{products.map((product) => <tr key={product.id}><td className="id-cell">{product.code}</td><td>{product.name}</td><td>{product.family}</td><td>{product.standard_pieces_per_drop ?? 'Not approved'}</td><td>{product.standard_cycle_time_sec ?? 'Not approved'}</td><td><span className="tag amber">DEMO ONLY</span></td></tr>)}</tbody></table></div></section>
       <section aria-label="Wet reject counter review"><h4 className="section-label">WET REJECT COUNTERS</h4><div className="table-wrap"><table><thead><tr><th>COUNTER</th><th>DEMO LABEL</th><th>SOURCE RULE</th><th>STATUS</th></tr></thead><tbody>{rejectReasons.map((reason) => <tr key={reason.code}><td className="id-cell">{reason.code}</td><td>{reason.label}</td><td>Dynamic cntR* quantity</td><td><span className="tag amber">UNAPPROVED</span></td></tr>)}</tbody></table></div><p className="subtle">Binary R* button states are excluded; counter mappings require owner confirmation.</p></section>
     </div>
+  </section>;
+}
+
+function SourceStatusPanel({ mode, health, dashboard }: { mode: SourceMode; health: SourceHealth | null; dashboard: SourceDashboard | null }) {
+  if (mode === 'MOCK') {
+    return <section className="source-mode-panel mock" aria-label="Source mode status"><strong>MOCK SOURCES ACTIVE</strong><span>Live SQL is not queried. SAVE remains process-local mock state.</span></section>;
+  }
+  if (mode === 'UNKNOWN') {
+    return <section className="source-mode-panel error" role="alert" aria-label="Source mode unavailable"><strong>SOURCE MODE UNKNOWN</strong><span>{health?.error ?? 'API unavailable; live data is not displayed and no fallback was made.'}</span></section>;
+  }
+
+  const statusObservation = dashboard?.wet_status?.observation;
+  const pressObservation = dashboard?.press_counter;
+  const errors = { ...(health?.error ? { connection: health.error } : {}), ...(dashboard?.source_errors ?? {}) };
+  return <section className="source-live-panel" aria-label="Live read-only source status" aria-live="polite">
+    <div className="source-live-heading"><div><strong>LIVE READ-ONLY SOURCES</strong><span>Operator SAVE remains process-local mock state.</span></div><span className={`tag ${health?.connected ? 'green' : 'amber'}`}>{health?.connected && health.read_only_permissions_verified ? 'CONNECTED · SELECT ONLY' : 'SOURCE ERROR'}</span></div>
+    {health?.connected && <p className="source-target">Target verified: {health.server} {health.instance ? `· ${health.instance}` : '· default instance'} · {health.database}</p>}
+    <div className="source-live-metrics">
+      <div><small>WET LINE · AUTORUN</small><strong>{dashboard?.wet_status?.status ?? 'UNKNOWN'}</strong><span>{String(statusObservation?._TIMESTAMP ?? 'No observation')}</span></div>
+      <div><small>LATEST PRODUCTCNT</small><strong>{pressObservation?._VALUE === undefined ? '—' : String(pressObservation._VALUE)}</strong><span>{String(pressObservation?._TIMESTAMP ?? 'No observation')} · quality {String(pressObservation?._QUALITY ?? '—')}</span></div>
+      <div><small>WET CAMERA PIECES · LOT WINDOW</small><strong>{dashboard?.wet_camera_pieces ?? 'Not verified'}</strong><span>Individual wet-tray counts; dry excluded</span></div>
+      <div><small>WET REJECT · LATEST CUMULATIVE COUNTERS</small><strong>{dashboard && Object.keys(dashboard.wet_reject_counts).length ? Object.entries(dashboard.wet_reject_counts).map(([tag, value]) => `${tag.slice(tag.lastIndexOf('.') + 1)}: ${value ?? '—'}`).join(' · ') : 'Not available'}</strong><span>cntR* only; not Lot quantities; R* excluded</span></div>
+    </div>
+    <p className="source-last-seen">Last source observation: {dashboard?.last_observation_at ?? 'Not available'}</p>
+    {Object.entries(errors).map(([source, message]) => <p className="source-error" role="alert" key={source}>{source}: {message}</p>)}
+    {dashboard?.warnings.map((warning, index) => <p className="source-warning" key={`${index}-${warning}`}>{warning}</p>)}
   </section>;
 }
 
