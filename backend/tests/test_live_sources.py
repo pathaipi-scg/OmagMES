@@ -20,13 +20,12 @@ from backend.app.sql_source import SQLServerReadOnlyRepository, SQLSourceSetting
 class FakeCursor:
     def __init__(self, connection: "FakeConnection") -> None:
         self.connection = connection
-        self.timeout = 0
         self.description: list[tuple[str]] = []
         self._one: tuple[Any, ...] | None = None
         self._many: list[tuple[Any, ...]] = []
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> "FakeCursor":
-        self.connection.statements.append((sql, params, self.timeout))
+        self.connection.statements.append((sql, params, self.connection.timeout))
         self._one = None
         self._many = []
         if "@@SERVERNAME" in sql:
@@ -82,6 +81,7 @@ class FakeConnection:
     def __init__(self) -> None:
         self.statements: list[tuple[str, tuple[Any, ...], int]] = []
         self.closed = False
+        self.timeout = 0
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -145,6 +145,18 @@ def test_press_query_is_parameterized_and_time_bounded() -> None:
     assert "_TIMESTAMP >= ? AND _TIMESTAMP < ?" in statement
     assert params == (75, PRESS_COUNTER_TAG, start.replace(tzinfo=None), end.replace(tzinfo=None))
     assert timeout == 7
+    assert connection.timeout == 7
+    assert connection.closed
+
+
+def test_query_timeout_uses_connection_property_supported_by_pyodbc() -> None:
+    connection = FakeConnection()
+    repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: connection)
+
+    result = repository.health()
+
+    assert result["connected"] is True
+    assert connection.timeout == 7
     assert connection.closed
 
 

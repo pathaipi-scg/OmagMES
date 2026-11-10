@@ -211,8 +211,8 @@ class SQLServerReadOnlyRepository:
             connection.close()
 
     def _verify_connection(self, connection: Any) -> dict[str, Any]:
+        connection.timeout = self.settings.query_timeout
         cursor = connection.cursor()
-        cursor.timeout = self.settings.query_timeout
         cursor.execute(
             """SELECT @@SERVERNAME AS server_name,
                       DB_NAME() AS database_name,
@@ -294,8 +294,8 @@ class SQLServerReadOnlyRepository:
             }
 
     def _cursor(self, connection: Any) -> Any:
+        connection.timeout = self.settings.query_timeout
         cursor = connection.cursor()
-        cursor.timeout = self.settings.query_timeout
         return cursor
 
     def _table_columns(self, connection: Any, table_name: str) -> list[str]:

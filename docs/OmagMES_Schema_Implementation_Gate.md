@@ -1,12 +1,12 @@
 # OmagMES Schema Implementation Gate
 
 **Prepared:** 2026-11-08  
-**Status:** Pre-implementation risk register. No database connection, SQL, DDL, or DML was attempted in this implementation session.  
+**Status:** Pre-implementation risk register, updated after an authorized SELECT-only source check. No DDL or DML was executed; the tested account was found to have broad write/DDL permissions and must not be used by the application.
 **Safety boundary:** SQL Server `OMAG`, schema `omagmes`; legacy `dbo` must remain read-only and unchanged. Migration scripts, when separately prepared, are drafts and must never be executed in this session.
 
 ## 1. Connection/configuration finding
 
-The existing OmagMES `.env` was inspected without displaying any credential values. Its configured server is `127.0.0.1`, which does not match the owner-specified SQL host `10.28.255.98`. The configured host was not contacted and no connection attempt was made. Do not silently replace environment settings or try credentials against the owner-specified server. The target database remains `OMAG`; connection and permission verification must be a separately authorized, read-only preflight.
+The existing OmagMES `.env` was inspected without displaying any credential values and remains unchanged at `127.0.0.1`. Under explicit user authorization, a temporary in-memory override connected to `10.28.255.98` / `OMAG` and verified SQL identity `SCGLS-NK\SQLEXPRESS`; PRESS metadata and bounded DropCnt history were read using SELECT statements only. The tested login had effective SELECT, INSERT, UPDATE, DELETE, ALTER and CONTROL permissions on `dbo.PRESS`, so it is not read-only. Do not use it for application reads; require a DBA-provisioned least-privilege identity. No SQL writes, DDL, DML, or migrations were executed. Do not silently replace `.env` settings.
 
 ## 2. Schema-critical review questions
 
@@ -32,4 +32,4 @@ The existing OmagMES `.env` was inspected without displaying any credential valu
 - Review-only draft package now exists in [db/review-only](../db/review-only/README.md): version 001 forward DDL, catalog validation, and an empty-schema-only rollback proposal. A static test checks ID/Rectime compliance and forward/rollback table-set parity; this does not validate T-SQL syntax or execute SQL Server.
 - The draft includes no Product, standard, Color, reject-reason, shift, equipment, user, or Mould seed data. It is an initial table proposal, not a fully approved production schema; effective-period overlap, identity/authentication, update immutability, source-key semantics, event capture, permissions, and source/database alignment remain unresolved.
 - Do not execute migrations. Before any possible future execution, reconcile the endpoint, verify exact target and read-only access, receive DBA/owner approval, review destructive rollback, and test against a disposable non-production database.
-- No migration is to be executed, and no SQL target connection is to be attempted until the owner-specified endpoint and read-only access scope are reconciled and explicitly verified.
+- No migration is to be executed. Further application/source connections require the approved endpoint, a verified SELECT-only login, the adapter timeout preflight fix, and separate owner/DBA approval.
