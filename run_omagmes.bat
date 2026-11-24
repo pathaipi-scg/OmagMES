@@ -13,20 +13,14 @@ if not exist "%ROOT%.venv\Scripts\python.exe" (
   echo Create/configure the project Python environment first.
   exit /b 1
 )
-if not exist "%ROOT%frontend\node_modules\vite\bin\vite.js" (
-  echo Frontend dependencies are not installed. Run npm install in the frontend folder first.
-  exit /b 1
-)
-
-start "OmagMES API - internal 8000" /D "%ROOT%" cmd /k ".venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000"
-echo Waiting for the internal FastAPI health endpoint...
-curl.exe --silent --show-error --fail --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 http://127.0.0.1:8000/api/health >nul
+start "OmagMES Web - %APP_PORT%" /D "%ROOT%" cmd /k ".venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 0.0.0.0 --port %APP_PORT%"
+echo Waiting for the server-rendered FastAPI application...
+curl.exe --silent --show-error --fail --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 http://127.0.0.1:%APP_PORT%/api/health >nul
 if errorlevel 1 (
-  echo FastAPI did not become ready on 127.0.0.1:8000. Check the API console before opening OmagMES.
+  echo OmagMES did not become ready on 127.0.0.1:%APP_PORT%. Check the application console.
   exit /b 1
 )
-start "OmagMES Web - access %APP_PORT%" /D "%ROOT%frontend" cmd /k "npm run dev"
 
 echo OmagMES is starting.
-echo Open http://localhost:%APP_PORT% on this computer, or http://HOSTNAME-OR-IP:%APP_PORT% from another computer.
-echo The FastAPI backend remains internal on 127.0.0.1:8000.
+echo Open http://localhost:%APP_PORT% on this computer.
+echo OmagMES is available on this computer and reachable network interfaces at port %APP_PORT%.

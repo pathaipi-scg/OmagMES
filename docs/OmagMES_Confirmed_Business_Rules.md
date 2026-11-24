@@ -65,10 +65,13 @@ The mandatory ID-first standard was verified at [skill/DATABASE_ID_FIRST_DESIGN_
 ### CONFIRMED — Press counter and Mould age
 
 1. Kepware DataLogger provides Press counter observations at approximately five-minute intervals. Use one shared accumulator for the Press counter; do not build a per-stroke transaction stream.
-2. The ProductCnt daily counter boundary is 07:00 Asia/Bangkok. Treat it as the known daily reset boundary for the approved feed, but do not assume a reset value/observation was received when it is missing. Also detect decreases/restarts outside 07:00, never apply a negative delta, and establish a new baseline while preserving uncertainty around gaps or ambiguous resets.
+2. The 07:00 Asia/Bangkok time is the Production Date cutoff, **not** a PLC reset rule. ProductCnt/DropCnt decreases may occur at any time and are evidence of a possible new Product run; they are not proof of Product/Color change. Never apply a negative delta; establish a new counter baseline while preserving uncertainty around gaps or ambiguous decreases.
 3. Process observations in timestamp order and make reprocessing idempotent. Preserve gaps, invalid-quality observations, reset ambiguity, and unbracketed Mould changes as explicit uncertainty; do not invent, interpolate, or silently allocate unknown strokes.
 4. Accumulated Press strokes are not finished-product quantities and must not be used as ProductionOutput, Curing quantity, reject quantity, or OEE counts.
 5. Current Mould Age resets only after approved Return from Recondition. Lifetime Age never resets. PLC counter resets do not reset either Mould-age definition.
+6. SQL Server Views calculate Daily Diff independently of Lot windows. Allocate a valid Diff by the **current PRESS sample timestamp** in the half-open effective Lot window `[StartTime, EndTime)`; the predecessor may belong to a prior Lot. A valid Diff at a new Lot's start belongs to the new Lot. Do not recalculate Diff per Lot or exclude a valid increment only because its samples straddle a Lot boundary.
+7. Lot ACC starts from zero for each immutable Lot identity and continues across Shift and Production Date changes while the same Lot remains active. Overlapping windows must not double-count; ambiguous matches remain explicitly unallocated.
+8. Operator-entered Lot StartTime/EndTime use the full calendar date and `HH:mm` minute precision, stored as `HH:mm:00`. Auto Lot source suggestions retain their source precision until an operator edits them. Show original suggestions separately from effective boundaries; an unedited suggestion is immediately effective for SQL ACC without a confirmation step. Operator edits are audited and SQL Views recalculate from the effective window.
 
 ### CONFIRMED — Production Run and Lot boundaries
 
@@ -77,8 +80,12 @@ The mandatory ID-first standard was verified at [skill/DATABASE_ID_FIRST_DESIGN_
 3. Returning to a Product after producing a different Product starts another new Run and another new Lot ID, even if the Product and desired LotName match a prior run.
 4. Stopping for a pause, breakdown, repair, or other interruption and resuming the same Product does not automatically create a Run or Lot.
 5. A shift change, calendar-date change, or mould change alone does not automatically create a Run or Lot.
-6. Every Lot remains associated with its original Product and production period. Preserve Run start/end timestamps and relevant activity or interruption records.
-7. Do not equate one report row, shift, or day with one Run.
+6. If Shift 1 starts a Product Lot and Shift 2 continues the same Product without counter-reset evidence or Color change, continue the original Lot. Do not split at the shift boundary or 07:00 Production Date cutoff.
+7. Preserve the original immutable Lot ID, official SCG Lot No., Lot-start Production Date and Shift Code, Product, Color, and Lot start time across continuation.
+8. Every production quantity entry continues to reference that original Lot ID and separately retains actual occurrence timestamp, Production Date, Shift identity, and applicable schedule version. Record/save time remains separate.
+9. A new Lot number uses the Production Date and Shift in effect when that new Lot starts. Do not rewrite the prior Lot's number or start context.
+10. Every Lot remains associated with its original Product and production period. Preserve Run start/end timestamps and relevant activity or interruption records.
+11. Do not equate one report row, shift, or day with one Run or Lot.
 
 ### CONFIRMED — immutable Lot identity and editable LotName
 
@@ -106,7 +113,7 @@ The mandatory ID-first standard was verified at [skill/DATABASE_ID_FIRST_DESIGN_
 
 **OBSERVED:** The quality workbook's `Std Data` is not verified as the authoritative Product Master. June production sheets and a curing log share some Lot strings, but date/quantity reconciliation is incomplete. Daily dry-output fields overlap production Lot strings, but the reviewed report is not verified as an independent Depallet transaction ledger. No historical workbook evidence authorizes using a LotName to merge rows into one future internal Lot.
 
-**OBSERVED counter qualification:** The separate bounded `OMAG.dbo.PRESS` analysis found roughly 25–48 second sample spacing during selected dense periods, longer gaps, and valid-quality decreases at varying times. This does not establish that `PRESS` is the same feed as the approximately five-minute Kepware DataLogger observations. The source/table alignment, timestamps, quality meaning, and logger cadence require confirmation; the bounded historical sample does not override the confirmed accumulator rules above.
+**OBSERVED counter qualification (2026-11-17):** A bounded seven-day analysis of exact `DropCnt` and `ProductCnt` tag queries kept the feeds separate. It returned 11,527 DropCnt rows, 27 ProductCnt rows, and 27 DropCnt decreases at varying times. ProductCnt did not bracket those DropCnt events. SQL `_TIMESTAMP` writer/timezone semantics remain unconfirmed; quality 192 and a 30-minute gap threshold are provisional. A repeated constant DropCnt value on Nov 15 needs logger review. These observations support treating decreases as evidence only, not a reset schedule or Lot boundary.
 
 **OBSERVED Product/OEE qualification:** The Jan–Oct Excel formula and standards investigation is documented in [OmagMES_Product_Standards_and_Wet_OEE_Excel_Analysis.md](OmagMES_Product_Standards_and_Wet_OEE_Excel_Analysis.md). `Std Data!BC2` is `Cycle Time`, `BC3` is `Second`, and the cycle-time sheets look up column BC as `STD`; the owner confirms the intended BC meaning is seconds per press Drop. `Std Data!BA2` and `BA3` retain conflicting historical labels, while the owner confirms the intended BA meaning is Pieces per Press Drop. Neither confirmation approves any historical numeric value. A duplicate-aware Jan–Oct scan identifies 25 exact Product Codes with numeric conflicts (13 BA, 17 BC); 22 match the CSV exactly and 3 do not. Full values and source locators are in [OmagMES_Product_Standard_Conflict_Review.md](OmagMES_Product_Standard_Conflict_Review.md) and its CSV. The legacy `OEE_Monitor` Performance is cycle-time/time based, aggregates separate Block/Fence sheets, and does not explicitly use actual Press Drops or IP Camera good pieces. It is not the confirmed Wet Performance definition.
 
@@ -179,3 +186,25 @@ Likewise, pausing Product A for repair and resuming it without switching Product
 15. Historical import source file versioning, exact row-level locator, mapping approval roles, correction/reversal process, and how ambiguous date/Product Code conflicts are escalated.
 
 No item above may be silently inferred from Lot strings, Product Code patterns, workbook directory names, or cached formulas.
+
+## 8. Shared Production Date and versioned Shift Schedule
+
+**CONFIRMED:** OmagMES distinguishes Calendar Date, Production Date, and Shift. Calendar Date is the local calendar date in `Asia/Bangkok`; Production Date is derived from the effective cutoff; Shift is assigned from an independent versioned schedule. The shared selected Production Date persists through navigation, refresh, reload, direct navigation, and browser history. A valid URL date wins, then an explicitly saved selection; only on first use does the app request the server-resolved current Production Date. Never use a fixed prototype date or auto-change a historical selection at midnight. Production Date does not replace event timestamps, `Rectime`, or actual Lot bounds.
+
+**CONFIRMED cutoff requirement:** initial cutoff time is 07:00 `Asia/Bangkok`; the owner approved initial effective Production Date **2026-11-10** for cutoff and Shift Schedule. Cutoff changes are immutable/effective-dated, require a reason and concurrency base version, and are stored independently from Shift Schedule versions. A new version changes the boundary on its effective calendar date and cannot rewrite confirmed historical facts. Operational windows are half-open `[start,end)` and contiguous; a cutoff transition can produce 23- or 25-hour adjacent windows.
+
+**CONFIRMED initial shift times:** Shift 1 is 08:00–19:00; Shift 2 is 19:00–06:00 on the next calendar day. The 06:00–08:00 period is unassigned. Shift Name is arbitrary display text, Shift Code is separate business/integration text, and Shift ID is immutable internal identity. Shift count is configurable, not fixed at two. The illustrative future three-shift example is not an approved active schedule.
+
+**CONFIRMED version behavior:** schedule changes create immutable versions effective by Production Date, with non-overlapping effective ranges. Cross-midnight intervals belong to the Production Date on which the shift starts. Historical production retains its original schedule version/shift facts; do not silently recalculate confirmed history. Gaps remain unassigned. Draft records retain their version and require explicit operator review if the version applicable to their Production Date changes. Draft detection remains provisional and cannot automatically create an official Lot.
+
+**IMPLEMENTATION / VERIFICATION STATUS:** the app has a centralized Bangkok cutoff resolver, SQL-backed repository/API, review-only migration proposal and deterministic tests. Migration 002 has no initial data; dedicated SQL settings and an authenticated operator identity are unavailable, no database connection/migration/write was made, and persistence across restarts is therefore **not verified**. Do not enable configuration writes until access-control and DBA/schema gates are reviewed. The prototype's initial schedule `effective_from=2026-01-01` is a mock placeholder only. See the [factory requirements and implementation handoff](OmagMES_Factory_Confirmed_Requirements.md#11-shared-production-date-and-dynamic-shift-schedule).
+
+**UNRESOLVED:** mapping a dynamic schedule Shift Code to the existing official Lot No. Shift segment. Do not use free-text Shift Name or change the Lot format without owner approval.
+
+## 9. SCG Lot number and counter-decrease clarification (2026-11-17)
+
+**CONFIRMED format:** SCG Lot No. is `C` + `DDMM` + two-digit Buddhist year + one-digit Shift Code + two-digit sequence + `B` for this Block factory (11 characters, e.g. `C150869101B`). Sequence starts at 01 for the new Lot's Production Date/Shift and cannot wrap/reuse after 99. If the same Product+Color continues across a shift or Production Date boundary, retain the original Lot ID, Lot No., and Lot-start context. Product or Color change creates a Lot; a shift/date boundary or PLC decrease alone does not. `ProductionLot.id` remains the immutable relational identity.
+
+**CONFIRMED correction:** 07:00 is only the Bangkok Production Date cutoff, not a PLC reset time. ProductCnt decreases can occur any time and are evidence of possible new Product runs; they do not prove Product/Color change. DropCnt and ProductCnt histories remain separate and must not be merged/summed.
+
+**IMPLEMENTATION STATUS:** read-only number preview, explicit Product/Color Lot confirmation UI, locked transactional sequence allocation code, and review-only DDL for sequence/reset-review audit and per-entry occurrence context are present. SQL creation remains disabled pending DBA-reviewed/applied migration, authenticated actor, approved masters, and policy for operation after sequence 99 is exhausted. The 06:00–08:00 schedule interval is unassigned. No Lot was written to SQL.

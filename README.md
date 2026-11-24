@@ -1,55 +1,30 @@
-# OmagMES Factory-Review Prototype
+# OmagMES
 
-React + TypeScript + Vite frontend with a FastAPI REST backend. This is a factory-review prototype, not a production MES deployment.
+OmagMES is a FastAPI application with server-rendered Jinja2 pages, static CSS/JavaScript, and SQL Server persistence in the `OMAG` database. The application SQL service identity is `OMAG_MES`; it is not an operator account and must never be granted `sysadmin` or `ALTER`.
 
-## Safety boundary
+## Operating model
 
-- **Mock-only writes:** saves live in process memory and are lost when the backend restarts.
-- **Gated read-only SQL:** live SQL access is disabled unless explicit configuration/approval gates pass. Do not enable it until the endpoint, instance, SELECT-only permissions, and source metadata are verified. No SQL migrations are run by the application.
-- **No production data:** Product names, Lots, counters, reject reasons, and KPI values are explicitly illustrative.
-- **No migrations executed:** legacy `dbo` remains untouched. See [schema implementation gate](docs/OmagMES_Schema_Implementation_Gate.md).
-- Product standard values remain blank because the historical numeric conflicts are unresolved. Do not copy mock values to production.
+- No application login, user-management system, authentication, or authorization middleware is used. Values entered into operator-label fields are user-supplied and unverified; they are audit context, not proof of identity.
+- Production SAVE, EDIT, and soft DELETE use real SQL transactions and audit history. Operational writes never fall back to process-local mock storage.
+- Writes fail closed if SQL target checks, schema-readiness checks, or database permissions fail. Do not configure the application to use `sa`.
+- Database schema deployment is separate from application startup and must be performed by an authorized administrator. Review [the database readiness report](docs/database-readiness-2026-11-17.md) and [the idempotent Migration 007 deployment script](db/admin-review/007_operator_production_audit_deploy.sql) before applying schema changes.
+- `OMAG.dbo.vw_OmagPlan` is queried read-only for PIS plan snapshots. Refreshing PIS never writes or replaces Production Entries.
+- React/Vite files remain as legacy material during migration; the launcher starts FastAPI/Jinja. Remove the old frontend only after SQL-backed Jinja workflows pass isolated integration verification.
 
-## Run locally (Windows PowerShell)
+## Run locally (Windows)
 
-Start the backend and frontend with the tracked launcher:
+Configure the Python environment and approved SQL connection settings in the local `.env` file. Do not commit credentials. Then start the application with `run_omagmes.bat`. It launches FastAPI on the configured application port, bound to all interfaces, following the FittingMES deployment pattern. Because there is no application authentication, expose it only to the intended trusted network and apply appropriate network controls.
 
-```powershell
-\.\run_omagmes.bat
-```
-
-The root `.env` and `.env.example` set `APP_PORT=3001`. Vite reads the repository-root `.env` even when started from the `frontend` directory, and falls back to port 3001 if the setting is missing or invalid. The launcher loads `APP_PORT` from the root `.env` before starting either process. FastAPI reads/reports that application setting but remains bound to `127.0.0.1:8000`; Vite listens on `0.0.0.0:$APP_PORT` and proxies `/api` to FastAPI.
-
-Alternatively, run the processes separately:
-
-```powershell
-\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
-```
-
-```powershell
-Set-Location frontend
-npm run dev
-```
-
-Open `http://localhost:<APP_PORT>` on the server computer. From another computer, open `http://<server-hostname-or-IP>:<APP_PORT>`; with the checked-in example value this is port 3001. The browser calls the API through the same origin, so no client-side API hostname or CORS setup is required. Vite's development and preview servers bind all interfaces; make sure Windows Firewall/network policy permits inbound TCP `<APP_PORT>`. FastAPI port 8000 is internal and should not be exposed to clients.
+The runtime must connect as `OMAG_MES` to the verified SQL Server instance and `OMAG` database. Do not run schema DDL from the application or its startup script.
 
 ## Validate
 
-From the repository root:
+Run the backend suite from the repository root with the workspace virtual environment:
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest backend\tests -q
-Set-Location frontend
-npm run build
-```
+`\.venv\Scripts\python.exe -m pytest -q backend/tests`
 
-## Prototype screens
+Real SQL integration tests are opt-in. Use a disposable isolated SQL Server test database and follow [the SQL integration test instructions](docs/sql-integration-tests.md); never point integration tests at operational `OMAG`.
 
-- Production: load suggestion-only AutoCal, edit Drops/Pieces, explicitly save.
-- Wet Reject: dynamic mock `cntR*` reason counters; `R*` button states are not accepted as quantities.
-- Wet Run Log: manually classified events; AutoRun does not overwrite operator classifications.
-- Wet OEE: visibly simulated demonstration only.
-- Curing / Depallet: mock lifecycle records retain the original Lot ID; event grain/units remain unresolved.
-- Settings: mock Run/Lot transitions, duplicate LotNames, audited mock rename, approval gates.
+## Current status
 
-See the [FittingMES workflow mapping](docs/OmagMES_FittingMES_Workflow_Implementation_Mapping.md) and [development progress handoff](docs/OmagMES_Development_Progress.md) for verified source analysis and current work status.
+The live database inspection found the base production schema but not the Migration 007 audit/delete, Wet Reject, and Mould objects. The runtime correctly keeps production forms unavailable until required schema is present. No historical transaction migration is needed because OmagMES has not been used in production. Real SQL SAVE/EDIT/DELETE and reconnect-persistence testing remains pending an isolated test database and DBA deployment.

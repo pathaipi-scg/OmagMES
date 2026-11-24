@@ -1,0 +1,88 @@
+.om-auto-lot-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.om-auto-lot-actions span {
+  color: #80621e;
+  font-size: 11px;
+}
+
+.om-auto-assignment .om-auto-lot-heading {
+  margin: 9px 0 7px;
+  color: #263445;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.om-auto-assignment .om-auto-lot-table tbody tr { cursor: pointer; }
+.om-auto-assignment .om-auto-lot-table tbody tr:nth-child(even):not(.is-selected) td { background: #f7f8fa; }
+.om-auto-assignment .om-auto-lot-table tbody tr.is-selected td,
+.om-auto-assignment .om-auto-lot-table tbody tr.is-selected .om-select-col { background: #e6f1fb; }
+.om-auto-assignment .om-auto-lot-table .om-select-col { width: 52px; text-align: center; }
+.om-auto-assignment .om-auto-lot-table input[type="radio"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #1765ad;
+  vertical-align: middle;
+}
+
+.om-assign-lot-panel { margin-top: 15px; padding-top: 12px; border-top: 1px solid #d5dce4; }
+.om-assign-lot-panel h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin: 0 0 12px;
+  color: #263445;
+  font-size: 15px;
+  font-weight: 700;
+}
+.om-assign-lot-panel h3 span { color: #526174; font-size: 14px; font-weight: 400; }
+.om-assign-grid {
+  display: grid;
+  grid-template-columns: minmax(230px, 1.55fr) minmax(130px, .85fr) minmax(180px, 1.2fr) 90px;
+  gap: 12px;
+  align-items: end;
+}
+.om-assign-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  color: #526174;
+  font-size: 11px;
+  font-weight: 600;
+}
+.om-assign-field > span { color: #34445a; font-size: 11px; }
+.om-assign-field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 5px 7px;
+  border: 1px solid #c7d2df;
+  border-radius: 4px;
+  background: #fff;
+  color: #243348;
+  font: inherit;
+}
+.om-assign-plan-control { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.om-assign-plan-control select { flex: 1 1 auto; }
+.om-assign-plan-control .button, .om-assign-field .button { min-height: 34px; white-space: nowrap; }
+.om-assign-product { display: flex; min-height: 34px; align-items: center; color: #34445a; font-size: 13px; font-weight: 400; }
+.om-assignment-note, .om-assignment-warning, .om-assignment-success { margin: 5px 0 9px; font-size: 11px; }
+.om-assignment-note { color: #526174; }
+.om-assignment-warning { color: #8a4b08; }
+.om-assignment-success { color: #25643b; }
+.om-assignment-plan-detail { display: block; margin-top: 8px; color: #718096; font-size: 10px; }
+
+@media (max-width: 800px) {
+  .om-assign-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+
+@media (max-width: 520px) {
+  .om-assign-grid { grid-template-columns: minmax(0, 1fr); }
+  .om-assign-plan-control { align-items: stretch; flex-direction: column; }
+}

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>OmagMES · {{ page_title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/omagmes.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="OmagMES Production"><span class="brand-mark">O</span><span>OMAG<span class="brand-light">MES</span><small>PRODUCTION SYSTEM</small></span></a>
+    <nav aria-label="Main navigation">
+      <a href="/" {% if active_page == 'production' %}aria-current="page"{% endif %}>Production</a>
+      <a href="/edit-log" {% if active_page == 'edit-log' %}aria-current="page"{% endif %}>Edit Log &amp; PIS Plan</a>
+    </nav>
+    <div class="runtime"><span class="status-dot"></span> {{ runtime_label }}</div>
+  </header>
+  <main class="page-shell">
+    {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
+    {% if success %}<div class="alert success" role="status">{{ success }}</div>{% endif %}
+    {% if schema_error %}<div class="alert warning" role="alert"><strong>SQL schema is not ready.</strong> {{ schema_error }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer>OmagMES · SQL Server OMAG · Application SQL identity: OMAG_MES · No in-memory production fallback</footer>
+</body>
+</html>

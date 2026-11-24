@@ -21,6 +21,7 @@ venv/
 .env
 config/.env
 !config/.env.example
+config/.env.omagmes
 
 # ----------------------------------
 # Logs

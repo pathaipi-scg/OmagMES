@@ -5,6 +5,8 @@ import './styles.css';
 import './fittingmes-ui.css';
 import './source-mode.css';
 import './source-window.css';
+import './production-page.css';
+import './navigation.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

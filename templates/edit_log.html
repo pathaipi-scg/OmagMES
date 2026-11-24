@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div><p class="eyebrow">AUDITABLE SQL RECORDS · READ-ONLY PIS SOURCE</p><h1>Edit Log</h1><p>Production records and their audit history are separate from the refreshed PIS plan snapshot.</p></div>
+  <a class="button secondary" href="/edit-log?production_date={{ production_date }}">Refresh Plan &amp; Log</a>
+</section>
+{% if not connected %}<section class="panel alert error" role="alert"><h2>Production SQL is unavailable</h2><p>{{ connection_error }}</p><p>No mock records are displayed.</p></section>{% endif %}
+{% if connected and schema_error %}<section class="panel alert warning" role="status"><h2>Production schema is incomplete</h2><p>{{ schema_error }}</p><p>Production transactions remain unavailable; the read-only PIS plan is loaded independently.</p></section>{% endif %}
+{% if connected and writes_enabled %}<div class="alert warning" role="status">Names shown in audit records are user-supplied and unverified; they are not authenticated identities.</div>{% endif %}
+{% if connected %}
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">PIS · READ ONLY</p><h2>Production Plan · SCGLS / OMAG / 3251</h2></div><span class="tag">{{ plans|length }} snapshots</span></div>
+  {% if plans_error %}<div class="alert error" role="alert">PIS Production Plan is temporarily unavailable: {{ plans_error }}</div>{% elif plans %}
+  {% if plans_truncated %}<div class="alert warning" role="status">Plan list was truncated at {{ plan_limit }} rows.</div>{% endif %}
+  <div class="table-scroll"><table><thead><tr><th>Plan</th><th>Material</th><th>Planned Start</th><th>Shift</th><th>Plan Count</th><th>Identity</th></tr></thead><tbody>
+  {% for plan in plans %}<tr><td>{{ plan.plan_name or 'Unnamed plan' }}<small>{{ plan.snapshot.OperationCode or '' }}</small></td><td>{{ plan.material_code or '—' }}<small>{{ plan.material_name or '—' }}</small></td><td>{{ plan.planned_start or '—' }}</td><td>{{ plan.shift or '—' }}</td><td>{{ plan.plan_count if plan.plan_count is not none else '—' }}</td><td>{% if plan.duplicate_count == 1 %}Unique snapshot{% else %}Duplicate ×{{ plan.duplicate_count }}{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  <p class="muted">Refreshing PIS never writes or replaces a Production Entry. Identical source rows have no stable source ID and remain indistinguishable.</p>
+  {% else %}<p class="muted">No plan rows match the requested Company, Machine and Plant.</p>{% endif %}
+</section>
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">PRODUCTION TRANSACTIONS</p><h2>Production Log · {{ entries|length }} entries</h2></div><form class="inline-form" method="get" action="/edit-log"><label for="production_date">Production Date</label><input id="production_date" name="production_date" type="date" value="{{ production_date }}"><button class="button secondary">Load</button></form></div>
+  {% if entries %}<div class="table-scroll"><table><thead><tr><th>Entry / Lot ID</th><th>Occurrence</th><th>Press Drops</th><th>Wet Good</th><th>User-supplied label · unverified</th><th>Audit / Actions</th></tr></thead><tbody>
+  {% for entry in entries %}<tr><td>#{{ entry.id }}<small>Lot #{{ entry.lot_id }}</small></td><td>{{ entry.production_at }}<small>{{ entry.production_date }} · Shift {{ entry.shift_id or 'unassigned' }}</small></td><td>{{ entry.actual_drops }}</td><td>{{ entry.wet_good_pieces }}</td><td>{{ entry.entered_by }}</td><td>
+    {% set history = audit_by_entry.get(entry.id, []) %}
+    <details><summary>{{ history|length }} audit events</summary>{% for event in history %}<div class="audit-event"><strong>{{ event.action }}</strong> · {{ event.changed_at }} · user-supplied label: {{ event.operator_id }} (unverified)<p>{{ event.reason }}</p><details><summary>Before / after state</summary><pre>{{ event.before|tojson(indent=2) if event.before else 'No prior state' }}
+{{ event.after|tojson(indent=2) if event.after else 'No active state after this event' }}</pre></details></div>{% endfor %}</details>
+    {% if writes_enabled %}<details class="action-details"><summary>Edit quantities</summary><form method="post" action="/web/production/{{ entry.id }}/edit" class="form-grid compact-form"><label>Press Drops<input name="actual_drops" type="number" min="0" value="{{ entry.actual_drops }}" required></label><label>Wet Good Pieces<input name="wet_good_pieces" type="number" min="0" value="{{ entry.wet_good_pieces }}" required></label><label class="wide">User-supplied operator label · unverified<input name="operator_id" maxlength="200" required></label><label class="wide">Correction reason<input name="reason" maxlength="500" required></label><label class="confirm wide"><input type="checkbox" name="operator_confirmed" value="yes" required><span>I confirm the corrected quantities.</span></label><div class="wide"><button class="button secondary">Save audited edit</button></div></form></details>
+    <details class="action-details"><summary>Delete entry</summary><form method="post" action="/web/production/{{ entry.id }}/delete" class="form-grid compact-form" onsubmit="return confirm('Soft-delete this Production Entry? Its audit history will be retained.')"><input type="hidden" name="production_date" value="{{ production_date }}"><label class="wide">User-supplied operator label · unverified<input name="operator_id" maxlength="200" required></label><label class="wide">Delete reason<input name="reason" maxlength="500" required></label><label class="confirm wide"><input type="checkbox" name="operator_confirmed" value="yes" required><span>I confirm this Production Entry should be soft-deleted.</span></label><div class="wide"><button class="button danger">Delete (retain audit)</button></div></form></details>{% endif %}
+  </td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<p class="muted">No persisted Production Entries match this Production Date.</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

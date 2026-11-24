@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -14,7 +15,9 @@ from backend.app.live_autocal import (
     calculate_press_drops,
     calculate_wet_rejects,
 )
-from backend.app.sql_source import SQLServerReadOnlyRepository, SQLSourceSettings, SourceUnavailable
+from backend.app.shift_schedule import initial_schedule_versions
+from backend.app.sql_source import DROP_COUNTER_TAG, SQLServerReadOnlyRepository, SQLSourceSettings, SourceUnavailable
+from backend.app.production_plans import PLAN_VIEW_COLUMNS
 
 
 class FakeCursor:
@@ -29,7 +32,7 @@ class FakeCursor:
         self._one = None
         self._many = []
         if "@@SERVERNAME" in sql:
-            self._one = ("OMAG-SQL\\PROD", "OMAG", "approved-instance")
+            self._one = ("OMAG_MES", "OMAG_MES", "SCGLS-NK\\SQLEXPRESS", "OMAG", "SQLEXPRESS", "dbo", 0)
         elif "HAS_PERMS_BY_NAME" in sql:
             self._one = (1, 0, 0, 0, 0, 0)
         elif "INFORMATION_SCHEMA.COLUMNS" in sql:
@@ -38,10 +41,22 @@ class FakeCursor:
                 "PRESS": ["id", "_NAME", "_VALUE", "_TIMESTAMP", "_QUALITY"],
                 "REJECT_WET": ["id", "_NAME", "_VALUE", "_TIMESTAMP", "_QUALITY"],
                 "product_count": ["id", "TimeStamp", "line", "value_cnt", "quality_flag", "is_duplicate"],
+                "vw_OmagPlan": list(PLAN_VIEW_COLUMNS),
+                "vw_PRESS_LotAuto": ["ProdDate", "ShiftType", "LotNo", "rw", "LotStart", "LotStop", "ShiftNo", "StartTime", "StopTime", "pDropCnt", "DropCnt"],
             }[table]
             self.description = [("COLUMN_NAME",)]
             self._many = [(column,) for column in cols]
         elif sql.startswith("SELECT TOP (?)"):
+            if "FROM dbo.vw_PRESS_LotAuto" in sql:
+                self.description = [(name,) for name in ("ProdDate", "ShiftType", "LotNo", "rw", "LotStart", "LotStop", "ShiftNo", "StartTime", "StopTime", "pDropCnt", "DropCnt")]
+                self._many = [(datetime(2026, 11, 23).date(), 3, "B231169201B", 1,
+                               datetime(2026, 11, 23, 10, 23), datetime(2026, 11, 23, 17, 23),
+                               "2", datetime.strptime("20:00", "%H:%M").time(),
+                               datetime.strptime("08:00", "%H:%M").time(), 0, 90)]
+                return self
+            if "FROM dbo.vw_OmagPlan" in sql:
+                self.description = [(name,) for name in PLAN_VIEW_COLUMNS]
+                return self
             if "FROM dbo.product_count" in sql:
                 self.description = [(name,) for name in ("id", "TimeStamp", "quality_flag", "is_duplicate", "line", "value_cnt")]
                 self._many = [(31, datetime(2026, 11, 8, 7, 10), "192", "0", "wet", 4)]
@@ -49,7 +64,11 @@ class FakeCursor:
             self.description = [(name,) for name in ("id", "_NAME", "_VALUE", "_TIMESTAMP", "_QUALITY")]
             if "_NAME = ?" in sql:
                 tag = params[1]
-                self._many = [(17, tag, 1, datetime(2026, 11, 8, 7, 5), 192)]
+                timestamp = params[2] + timedelta(minutes=5) if len(params) >= 4 else datetime(2026, 11, 8, 7, 5)
+                value = 1 if tag == AUTORUN_TAG else 100
+                self._many = [(17, tag, value, timestamp, 192)]
+                if tag == DROP_COUNTER_TAG and len(params) >= 4:
+                    self._many.append((18, tag, value + 1, timestamp + timedelta(minutes=5), 192))
             elif "_NAME IN" in sql:
                 self._many = [(18, PRESS_COUNTER_TAG, 44, datetime(2026, 11, 8, 7, 10), 192)]
             elif "_NAME LIKE ?" in sql:
@@ -93,10 +112,10 @@ class FakeConnection:
 def live_settings(**updates: Any) -> SQLSourceSettings:
     values = dict(
         mode="LIVE_READ_ONLY",
-        server="10.28.255.98\\approved-instance",
+        server="127.0.0.1",
         database="OMAG",
         driver="ODBC Driver 17 for SQL Server",
-        username="unit-test-login",
+        username="OMAG_MES",
         password="unit-test-password",
         encrypt=True,
         trust_server_certificate=False,
@@ -127,6 +146,11 @@ def observation(tag: str, moment: str, value: int, *, quality: int = 192, row_id
     return {"id": row_id, "_NAME": tag, "_VALUE": value, "_TIMESTAMP": moment, "_QUALITY": quality}
 
 
+def test_live_source_refuses_sa_fallback_identity() -> None:
+    settings = live_settings(username="sa")
+    assert any("dedicated OMAG_MES login" in error for error in settings.live_gate_errors())
+
+
 def window(start: str = "2026-11-08T06:00:00+07:00", end: str = "2026-11-08T09:00:00+07:00") -> tuple[datetime, datetime]:
     return datetime.fromisoformat(start), datetime.fromisoformat(end)
 
@@ -147,6 +171,59 @@ def test_press_query_is_parameterized_and_time_bounded() -> None:
     assert timeout == 7
     assert connection.timeout == 7
     assert connection.closed
+
+
+def test_dropcnt_query_uses_exact_tag_separate_from_productcnt() -> None:
+    connection = FakeConnection()
+    repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: connection)
+    start, end = window()
+
+    rows = repository.dropcnt_observations(start, end, 75)
+
+    statement, params, _ = next(item for item in connection.statements if "SELECT TOP (?)" in item[0])
+    assert rows[0]["_NAME"] == DROP_COUNTER_TAG
+    assert params == (75, DROP_COUNTER_TAG, start.replace(tzinfo=None), end.replace(tzinfo=None))
+    assert "_TIMESTAMP >= ? AND _TIMESTAMP < ?" in statement
+    assert "ProductCnt" not in statement
+    permission_checks = [params for sql, params, _ in connection.statements if "HAS_PERMS_BY_NAME" in sql]
+    assert permission_checks == [("dbo.PRESS",) * 6]
+    assert all(sql.lstrip().upper().startswith("SELECT") for sql, _, _ in connection.statements)
+
+
+def test_production_plan_query_uses_exact_pis_scope_as_parameters() -> None:
+    connection = FakeConnection()
+    repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: connection)
+
+    result = repository.production_plan_snapshots(limit=25)
+
+    statement, params, _ = next(item for item in connection.statements if "FROM dbo.vw_OmagPlan" in item[0])
+    assert result["source"] == "OMAG.dbo.vw_OmagPlan"
+    assert result["filters"] == {"Company": "SCGLS", "Machine": "OMAG", "Plant": "3251"}
+    assert "WHERE [Company] = ? AND [Machine] = ? AND [Plant] = ?" in statement
+    assert params == (26, "SCGLS", "OMAG", "3251")
+    assert "SCGLS" not in statement and "OMAG" not in statement and "3251" not in statement
+    assert connection.closed
+
+
+def test_production_plan_query_filters_selected_date_with_parameters() -> None:
+    connection = FakeConnection()
+    repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: connection)
+
+    result = repository.production_plan_snapshots(limit=25, production_date="2026-11-17")
+
+    statement, params, _ = next(item for item in connection.statements if "FROM dbo.vw_OmagPlan" in item[0])
+    assert result["production_date"] == "2026-11-17"
+    assert "[StartTime] >= ? AND [StartTime] < ?" in statement
+    assert params == (26, "SCGLS", "OMAG", "3251", datetime(2026, 11, 17).date(), datetime(2026, 11, 18).date())
+    assert "2026-11-17" not in statement
+    assert connection.closed
+
+
+def test_production_plan_query_rejects_noncanonical_date() -> None:
+    repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: FakeConnection())
+
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        repository.production_plan_snapshots(production_date="2026-11-17T00:00:00")
 
 
 def test_query_timeout_uses_connection_property_supported_by_pyodbc() -> None:
@@ -196,7 +273,7 @@ def test_available_reject_counters_are_dynamic_and_latest_values_stay_cumulative
     assert rows[0]["_VALUE"] == 6
 
 
-def test_localhost_config_is_rejected_before_connection_attempt() -> None:
+def test_approved_localhost_config_can_connect_with_dedicated_login() -> None:
     calls = 0
 
     def should_not_connect(*_args: Any, **_kwargs: Any) -> FakeConnection:
@@ -205,9 +282,8 @@ def test_localhost_config_is_rejected_before_connection_attempt() -> None:
         return FakeConnection()
 
     repository = SQLServerReadOnlyRepository(live_settings(server="127.0.0.1"), should_not_connect)
-    with pytest.raises(SourceUnavailable, match="approved host"):
-        repository.latest_press_counter()
-    assert calls == 0
+    repository.latest_press_counter()
+    assert calls == 1
 
 
 def test_camera_metadata_is_discovered_before_any_camera_data_query() -> None:
@@ -261,9 +337,22 @@ def test_read_only_preflight_rejects_a_login_with_write_permission() -> None:
     connection = WritableConnection()
     repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: connection)
 
-    with pytest.raises(SourceUnavailable, match="SELECT-only"):
-        repository.latest_press_counter()
+    rows = repository.dropcnt_observations(*window(), 10)
+    assert rows[0]["_NAME"] == DROP_COUNTER_TAG
+    assert repository._last_preflight["read_only_permissions_verified"] is False
+    assert repository._last_preflight["write_capabilities_present"] == ["UPDATE"]
+    assert repository._last_preflight["source_queries_select_only_enforced"] is True
     assert connection.closed
+
+
+def test_source_repository_rejects_non_select_sql_before_cursor_execution() -> None:
+    for sql in (
+        "DELETE FROM dbo.PRESS",
+        "SELECT 1; DELETE FROM dbo.PRESS",
+    ):
+        with pytest.raises(SourceUnavailable, match="SELECT statements only"):
+            SQLServerReadOnlyRepository._execute_select(FakeCursor(FakeConnection()), sql)
+    SQLServerReadOnlyRepository._execute_select(FakeCursor(FakeConnection()), "SELECT 'DELETE' AS sample /* UPDATE dbo.PRESS */")
 
 
 def test_connection_error_does_not_expose_exception_text_or_credentials() -> None:
@@ -292,257 +381,204 @@ def test_all_executed_source_statements_are_selects() -> None:
     assert all(sql.lstrip().upper().startswith("SELECT") for sql, _, _ in connection.statements)
 
 
-def test_press_autocal_accounts_for_known_0700_reset_without_negative_delta() -> None:
+def test_auto_lot_candidate_api_is_fail_closed_in_mock_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = live_settings(mode="MOCK")
+    connection = FakeConnection()
+    repository = SQLServerReadOnlyRepository(settings, lambda *_args, **_kwargs: connection)
+    query_calls = 0
+    original_query = repository.dropcnt_observations
+
+    def observe_query(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        nonlocal query_calls
+        query_calls += 1
+        return original_query(*args, **kwargs)
+
+    repository.dropcnt_observations = observe_query  # type: ignore[method-assign]
+    monkeypatch.setattr(main, "source_repository", repository)
+    monkeypatch.setattr(main.configuration_repository, "get_cutoff_versions", lambda: [
+        {"id": 1, "effective_from": "2026-01-01", "cutoff_time": "07:00", "time_zone": "Asia/Bangkok"},
+    ])
+    monkeypatch.setattr(main.configuration_repository, "get_shift_versions", lambda: initial_schedule_versions())
+
+    response = TestClient(main.app).get("/api/auto-lot/candidates", params={"production_date": "2026-11-10"})
+
+    assert response.status_code == 200
+    assert response.json()["available"] is False
+    assert response.json()["candidates"] == []
+    assert response.json()["production_day_window"]["interval_semantics"] == "[start, end)"
+    assert query_calls == 0
+    assert connection.statements == []
+
+
+def test_auto_lot_candidate_api_never_calculates_python_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = FakeConnection()
+    repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: connection)
+    monkeypatch.setattr(main, "source_repository", repository)
+    monkeypatch.setattr(main.configuration_repository, "get_cutoff_versions", lambda: [
+        {"id": 1, "effective_from": "2026-01-01", "cutoff_time": "07:00", "time_zone": "Asia/Bangkok"},
+    ])
+    monkeypatch.setattr(main.configuration_repository, "get_shift_versions", lambda: initial_schedule_versions())
+    monkeypatch.setattr(main.store, "auto_lot_candidate_reviews", [])
+    monkeypatch.setattr(main.store, "auto_lot_candidate_snapshots", {})
+    client = TestClient(main.app)
+
+    response = client.get("/api/auto-lot/candidates", params={"production_date": "2026-11-10"})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["available"] is True
+    assert result["candidates"] == []
+    assert any("SQL Server views" in warning for warning in result["warnings"])
+    assert "sql_candidate_sync" not in result
+    assert any("FROM dbo.PRESS" in sql and "SELECT" in sql for sql, _, _ in connection.statements)
+    assert all(sql.lstrip().upper().startswith("SELECT") for sql, _, _ in connection.statements)
+
+
+def test_press_lot_api_repository_reads_only_bounded_sql_views() -> None:
+    connection = FakeConnection()
+    repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: connection)
     start, end = window()
-    rows = [
-        observation(PRESS_COUNTER_TAG, "2026-11-08T06:55:00+07:00", 4870, row_id=1),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 10, row_id=2),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:10:00+07:00", 15, row_id=3),
-    ]
 
-    result = calculate_press_drops(
-        rows, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=20,
-    )
+    assert repository.press_lot_summary("2026-11-10", 50) == []
+    assert repository.press_lot_acc(start, end, 75) == []
 
-    assert result["suggestion"] == 15
-    assert any("post-07:00" in warning for warning in result["warnings"])
+    view_queries = [(sql, params) for sql, params, _ in connection.statements if "omagmes.v_PressLot" in sql]
+    assert len(view_queries) == 2
+    assert "WHERE ProductionDate=?" in view_queries[0][0]
+    assert view_queries[0][1] == (51, "2026-11-10")
+    assert "WHERE RecTime>=? AND RecTime<?" in view_queries[1][0]
+    assert view_queries[1][1][0] == 76
+    assert all(sql.lstrip().upper().startswith("SELECT") for sql, _, _ in connection.statements)
 
 
-def test_press_autocal_flags_missing_boundary_and_does_not_add_pre_window_counter() -> None:
-    start, end = window("2026-11-08T07:02:00+07:00", "2026-11-08T07:20:00+07:00")
-    rows = [
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 100, row_id=1),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:10:00+07:00", 106, row_id=2),
-    ]
+def test_press_lot_auto_reads_sql_generated_number_shift_and_count() -> None:
+    connection = FakeConnection()
+    repository = SQLServerReadOnlyRepository(live_settings(), lambda *_args, **_kwargs: connection)
 
-    result = calculate_press_drops(
-        rows, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=20,
-    )
+    result = repository.press_lot_auto("2026-11-23", limit=10)
 
-    assert result["suggestion"] == 6
-    assert any("Lot start boundary" in warning for warning in result["warnings"])
-    assert any("Lot end boundary" in warning for warning in result["warnings"])
-
-
-def test_counter_decrease_outside_daily_reset_rebaselines_without_negative_quantity() -> None:
-    start, end = window("2026-11-08T07:00:00+07:00", "2026-11-08T08:00:00+07:00")
-    rows = [
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 100, row_id=1),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:10:00+07:00", 110, row_id=2),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:15:00+07:00", 3, row_id=3),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:20:00+07:00", 8, row_id=4),
-    ]
-
-    result = calculate_press_drops(
-        rows, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=20,
-    )
-
-    assert result["suggestion"] == 115
-    assert any("decrease outside" in warning for warning in result["warnings"])
+    assert result["source"] == "OMAG.dbo.vw_PRESS_LotAuto"
+    assert result["production_date"] == "2026-11-23"
+    assert result["rows"][0]["LotNo"] == "B231169201B"
+    assert result["rows"][0]["ShiftType"] == 3
+    assert result["rows"][0]["ShiftNo"] == "2"
+    assert result["rows"][0]["DropCnt"] == 90
+    query = next(sql for sql, _, _ in connection.statements if "FROM dbo.vw_PRESS_LotAuto" in sql)
+    assert "WHERE ProdDate=?" in query
+    assert "ORDER BY LotStart,LotNo,rw" in query
+    assert all(sql.lstrip().upper().startswith("SELECT") for sql, _, _ in connection.statements)
 
 
-def test_first_post_reset_value_is_used_when_no_pre_reset_sample_exists() -> None:
-    start, end = window("2026-11-08T06:30:00+07:00", "2026-11-08T08:00:00+07:00")
-    rows = [
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 12, row_id=1),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:10:00+07:00", 19, row_id=2),
-    ]
-    result = calculate_press_drops(
-        rows, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=20,
-    )
-    assert result["suggestion"] == 19
+def test_production_overview_uses_source_autolot_view_and_does_not_recalculate_shift(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = live_settings()
+    source_row = {
+        "ProdDate": datetime(2026, 11, 17).date(), "ShiftType": 3, "LotNo": "B171169201B", "rw": 2,
+        "LotSequence": 1, "SourceRowNumber": 2, "ShiftStatus": "RESOLVED", "LotStatus": "ALLOCATED",
+        "LotStart": datetime(2026, 11, 17, 21), "LotStop": datetime(2026, 11, 18, 7, 50),
+        "ShiftNo": "2", "StartTime": datetime.strptime("20:00", "%H:%M").time(),
+        "StopTime": datetime.strptime("08:00", "%H:%M").time(), "pDropCnt": 0, "DropCnt": 833,
+    }
 
+    class ViewSource:
+        def __init__(self) -> None:
+            self.settings = settings
+            self.dates: list[str] = []
 
-def test_counter_gap_quality_duplicate_and_out_of_order_conditions_are_explicit() -> None:
-    start, end = window("2026-11-08T07:00:00+07:00", "2026-11-08T08:00:00+07:00")
-    rows = [
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:10:00+07:00", 10, row_id=2),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 5, row_id=1),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:40:00+07:00", 40, row_id=3),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:45:00+07:00", 45, quality=0, row_id=4),
-    ]
+        def press_lot_auto(self, production_date: str, _limit: int = 5000) -> dict[str, Any]:
+            self.dates.append(production_date)
+            rows = [source_row] if production_date == "2026-11-17" else []
+            return {"source": "OMAG.dbo.vw_PRESS_LotAuto", "rows": rows, "identity_strategy": "LotStart"}
 
-    result = calculate_press_drops(
-        rows, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=10,
-    )
-
-    assert result["suggestion"] == 10
-    assert any("Out-of-order" in warning for warning in result["warnings"])
-    assert any("gap" in warning.lower() for warning in result["warnings"])
-    assert any("quality" in warning.lower() for warning in result["warnings"])
-
-
-def test_duplicate_counter_timestamps_are_deduplicated_or_withheld_when_conflicting() -> None:
-    start, end = window("2026-11-08T07:00:00+07:00", "2026-11-08T08:00:00+07:00")
-    same = [
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 5, row_id=1),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 5, row_id=2),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:10:00+07:00", 10, row_id=3),
-    ]
-    same_result = calculate_press_drops(
-        same, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=20,
-    )
-    assert same_result["suggestion"] == 10
-    assert any("deduplicated" in warning for warning in same_result["warnings"])
-
-    conflicting = [same[0], observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 7, row_id=4), same[-1]]
-    conflict_result = calculate_press_drops(
-        conflicting, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=20,
-    )
-    assert conflict_result["suggestion"] is None
-    assert any("Conflicting duplicate" in warning for warning in conflict_result["warnings"])
-
-
-def test_press_autocal_withholds_value_when_quality_semantics_are_not_configured() -> None:
-    start, end = window()
-    result = calculate_press_drops(
-        [observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 10)], start, end,
-        source_timezone="Asia/Bangkok", source_timezone_confirmed=True,
-    )
-    assert result["suggestion"] is None
-    assert any("quality semantics" in warning for warning in result["warnings"])
-
-
-def test_counter_autocal_withholds_value_when_maximum_gap_is_not_approved() -> None:
-    start, end = window("2026-11-08T07:00:00+07:00", "2026-11-08T08:00:00+07:00")
-    rows = [
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:05:00+07:00", 10, row_id=1),
-        observation(PRESS_COUNTER_TAG, "2026-11-08T07:10:00+07:00", 15, row_id=2),
-    ]
-
-    result = calculate_press_drops(
-        rows, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=None,
-    )
-
-    assert result["suggestion"] is None
-    assert result["samples_used"] == 0
-    assert any("maximum counter-gap threshold" in warning for warning in result["warnings"])
-
-
-def test_wet_reject_cal_uses_only_dynamic_quantity_tags() -> None:
-    start, end = window("2026-11-08T07:00:00+07:00", "2026-11-08T08:00:00+07:00")
-    rows = [
-        observation("MODBUS.WET_REJECT.cntR1", "2026-11-08T07:05:00+07:00", 3, row_id=1),
-        observation("MODBUS.WET_REJECT.cntR1", "2026-11-08T07:10:00+07:00", 8, row_id=2),
-        observation("MODBUS.WET_REJECT.R1", "2026-11-08T07:10:00+07:00", 1, row_id=3),
-        observation("MODBUS.WET_REJECT.cntR27", "2026-11-08T07:05:00+07:00", 12, row_id=4),
-        observation("MODBUS.WET_REJECT.cntR27", "2026-11-08T07:10:00+07:00", 15, row_id=5),
-    ]
-
-    result = calculate_wet_rejects(
-        rows, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=20,
-    )
-
-    assert result["suggestions"] == {"MODBUS.WET_REJECT.cntR1": 8, "MODBUS.WET_REJECT.cntR27": 15}
-    assert all(".R1" not in tag for tag in result["suggestions"])
-
-
-def test_wet_reject_autocal_obeys_0700_daily_reset() -> None:
-    start, end = window("2026-11-08T06:00:00+07:00", "2026-11-08T08:00:00+07:00")
-    rows = [
-        observation("MODBUS.WET_REJECT.cntR4", "2026-11-08T06:55:00+07:00", 80, row_id=1),
-        observation("MODBUS.WET_REJECT.cntR4", "2026-11-08T07:05:00+07:00", 2, row_id=2),
-        observation("MODBUS.WET_REJECT.cntR4", "2026-11-08T07:10:00+07:00", 5, row_id=3),
-    ]
-    result = calculate_wet_rejects(
-        rows, start, end, valid_quality_codes=(192,), source_timezone="Asia/Bangkok",
-        source_timezone_confirmed=True, max_gap_minutes=20,
-    )
-    assert result["suggestions"]["MODBUS.WET_REJECT.cntR4"] == 5
-
-
-def test_wet_camera_values_are_individual_tray_piece_counts() -> None:
-    start, end = window("2026-11-08T07:00:00+07:00", "2026-11-08T08:00:00+07:00")
-    rows = [
-        {"source_id": 1, "timestamp": "2026-11-08T07:10:00+07:00", "quality": "192", "duplicate": "0", "line": "wet", "value_cnt": 4},
-        {"source_id": 2, "timestamp": "2026-11-08T07:20:00+07:00", "quality": "192", "duplicate": "0", "line": "wet", "value_cnt": 5},
-        {"source_id": 3, "timestamp": "2026-11-08T07:30:00+07:00", "quality": "192", "duplicate": "0", "line": "dry", "value_cnt": 999},
-    ]
-
-    result = calculate_camera_pieces(
-        rows, start, end, source_timezone="Asia/Bangkok", source_timezone_confirmed=True,
-        metadata_reviewed=True, boundary_policy_confirmed=True,
-        valid_quality_values=("192",), duplicate_clear_values=("0",),
-    )
-
-    assert result["suggestion"] == 9
-    assert result["observations_used"] == 2
-
-
-def test_camera_duplicate_and_quality_rules_exclude_unverified_rows() -> None:
-    start, end = window("2026-11-08T07:00:00+07:00", "2026-11-08T08:00:00+07:00")
-    rows = [
-        {"source_id": 1, "timestamp": "2026-11-08T07:10:00+07:00", "quality": "192", "duplicate": "0", "line": "wet", "value_cnt": 4},
-        {"source_id": 2, "timestamp": "2026-11-08T07:20:00+07:00", "quality": "192", "duplicate": "1", "line": "wet", "value_cnt": 10},
-        {"source_id": 3, "timestamp": "2026-11-08T07:30:00+07:00", "quality": "bad", "duplicate": "0", "line": "wet", "value_cnt": 7},
-    ]
-    result = calculate_camera_pieces(
-        rows, start, end, source_timezone="Asia/Bangkok", source_timezone_confirmed=True,
-        metadata_reviewed=True, boundary_policy_confirmed=True,
-        valid_quality_values=("192",), duplicate_clear_values=("0",),
-    )
-    assert result["suggestion"] == 4
-    assert any("duplicate" in warning for warning in result["warnings"])
-    assert any("quality" in warning for warning in result["warnings"])
-
-
-def test_camera_lot_attribution_is_withheld_without_approved_boundary_policy() -> None:
-    start, end = window()
-    result = calculate_camera_pieces(
-        [{"source_id": 1, "timestamp": start.isoformat(), "quality": "192", "duplicate": "0", "line": "wet", "value_cnt": 5}],
-        start, end, source_timezone="Asia/Bangkok", source_timezone_confirmed=True,
-        metadata_reviewed=True, boundary_policy_confirmed=False,
-        valid_quality_values=("192",), duplicate_clear_values=("0",),
-    )
-    assert result["suggestion"] is None
-    assert any("attribution" in warning for warning in result["warnings"])
-
-
-def test_live_failure_is_reported_without_switching_to_mock_or_saving() -> None:
-    class FailedSource:
-        settings = live_settings()
+    class AutoLotReader:
+        @staticmethod
+        def normalize_detections(rows: list[dict[str, Any]], production_date: str):
+            return main.SQLServerAutoLotRepository.normalize_detections(rows, production_date)
 
         @staticmethod
-        def health() -> dict[str, Any]:
-            return {"mode": "LIVE READ-ONLY", "connected": False, "error": "owner approval required"}
+        def is_available() -> bool:
+            return False
 
-    original = main.source_repository
-    main.source_repository = FailedSource()  # type: ignore[assignment]
-    try:
-        client = TestClient(main.app)
-        health = client.get("/api/sources/health").json()
-        assert health["mode"] == "LIVE READ-ONLY"
-        assert health["connected"] is False
-    finally:
-        main.source_repository = original
+        @staticmethod
+        def list_for_date(_production_date: str) -> list[dict[str, Any]]:
+            return []
+
+    source = ViewSource()
+    monkeypatch.setattr(main, "source_repository", source)
+    monkeypatch.setattr(main, "auto_lot_repository", AutoLotReader())
+    monkeypatch.setattr(main, "production_repository", type("ProductionStore", (), {
+        "production_day_lots": staticmethod(lambda *_args: []),
+    })())
+    monkeypatch.setattr(main, "read_cutoff_versions", lambda: [
+        {"id": 1, "effective_from": "2026-01-01", "cutoff_time": "07:00", "time_zone": "Asia/Bangkok"},
+    ])
+    monkeypatch.setattr(main.configuration_repository, "get_daily_shift_configuration", lambda selected: {
+        "status": "SAVED", "production_date": selected, "selected_type": 3, "type_code": "TYPE 3",
+        "configuration_save_id": 33, "schedule": {"effective_production_date": selected, "periods": [
+            {"shift_id": 2, "shift_number": 2, "period_order": 1, "start_time": "20:00", "end_time": "08:00", "end_next_day": True, "active": True},
+            {"shift_id": 10004, "shift_number": 3, "period_order": 2, "start_time": "08:00", "end_time": "20:00", "end_next_day": False, "active": True},
+        ]},
+    })
+
+    result = main.production_overview("2026-11-17")
+
+    assert source.dates == ["2026-11-17"]
+    assert result["source"] == "OMAG.dbo.vw_PRESS_LotAuto"
+    assert result["auto_lots"][0] == source_row
+    assert result["auto_lots"][0]["LotNo"] == "B171169201B"
+    assert result["auto_lots"][0]["DropCnt"] == 833
+    assert result["auto_lots"][0]["ShiftNo"] == "2"
+    assert result["press_error"] is None
 
 
-def test_live_autocal_requires_verified_lot_window_before_querying_sources() -> None:
-    original = main.source_repository
-    main.source_repository = SQLServerReadOnlyRepository(live_settings(lot_window_source_confirmed=False))
-    start, end = window()
-    try:
-        with pytest.raises(main.HTTPException, match="Lot time window"):
-            main.autocal_preview(lot_id=501, start_at=start, end_at=end, window_confirmed=True)
-    finally:
-        main.source_repository = original
+def test_production_overview_does_not_require_saved_shift_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = live_settings()
 
+    class ViewSource:
+        def __init__(self) -> None:
+            self.settings = settings
+            self.queries = 0
 
-def test_no_production_save_is_triggered_by_live_preview() -> None:
-    from backend.app.store import store
+        def press_lot_auto(self, production_date: str, _limit: int = 5000) -> dict[str, Any]:
+            self.queries += 1
+            return {"source": "OMAG.dbo.vw_PRESS_LotAuto", "rows": [{
+                "ProdDate": datetime.fromisoformat(production_date).date(), "ShiftType": 3,
+                "LotNo": "B171169101B", "rw": 1, "LotStart": datetime(2026, 11, 17, 10),
+                "LotSequence": 1, "SourceRowNumber": 1, "ShiftStatus": "RESOLVED", "LotStatus": "ALLOCATED",
+                "LotStop": datetime(2026, 11, 17, 13), "ShiftNo": "1",
+                "StartTime": datetime.strptime("08:00", "%H:%M").time(),
+                "StopTime": datetime.strptime("20:00", "%H:%M").time(), "pDropCnt": 0, "DropCnt": 186,
+            }], "identity_strategy": "LotStart"}
 
-    before_production = len(store.production_entries)
-    before_reject = len(store.reject_entries)
-    response = TestClient(main.app).get("/api/autocal/preview")
-    assert response.status_code == 200
-    assert len(store.production_entries) == before_production
-    assert len(store.reject_entries) == before_reject
+    class AutoLotReader:
+        @staticmethod
+        def normalize_detections(rows: list[dict[str, Any]], production_date: str):
+            return main.SQLServerAutoLotRepository.normalize_detections(rows, production_date)
+
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+        @staticmethod
+        def list_for_date(_production_date: str) -> list[dict[str, Any]]:
+            return []
+
+    source = ViewSource()
+    monkeypatch.setattr(main, "source_repository", source)
+    monkeypatch.setattr(main, "auto_lot_repository", AutoLotReader())
+    monkeypatch.setattr(main, "production_repository", type("ProductionStore", (), {
+        "production_day_lots": staticmethod(lambda *_args: []),
+    })())
+    monkeypatch.setattr(main, "read_cutoff_versions", lambda: [
+        {"id": 1, "effective_from": "2026-01-01", "cutoff_time": "07:00", "time_zone": "Asia/Bangkok"},
+    ])
+    monkeypatch.setattr(main.configuration_repository, "get_daily_shift_configuration", lambda selected: {
+        "status": "DEFAULT", "production_date": selected, "selected_type": 3,
+        "type_code": "TYPE 3", "configuration_save_id": 10, "schedule": None,
+    })
+
+    result = main.production_overview("2026-11-17")
+
+    assert source.queries == 1
+    assert result["auto_lot_status"] == "DIRECT SQL VIEW"
+    assert result["auto_lots"][0]["LotNo"] == "B171169101B"
+    assert result["auto_lots"][0]["DropCnt"] == 186

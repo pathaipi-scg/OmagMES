@@ -12,9 +12,10 @@ export default defineConfig(({ mode }) => {
   const appPort = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535
     ? parsedPort
     : fallbackAppPort;
+  const apiTarget = process.env.OMAGMES_API_PROXY_TARGET ?? env.OMAGMES_API_PROXY_TARGET ?? 'http://127.0.0.1:8000';
   const apiProxy = {
     '/api': {
-      target: 'http://127.0.0.1:8000',
+      target: apiTarget,
       changeOrigin: true,
     },
   };

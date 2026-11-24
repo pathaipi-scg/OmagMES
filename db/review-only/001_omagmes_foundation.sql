@@ -1,8 +1,10 @@
 /*
-REVIEW-ONLY DRAFT — DO NOT EXECUTE.
+SUPERSEDED FOUNDATION DRAFT — DO NOT EXECUTE.
 Version: 001 / 2026-11-08
 Target: SQL Server database OMAG, application schema omagmes.
-This draft has not been run, parsed by SQL Server, reviewed by a DBA, or approved by process owners.
+This draft conflicts with the factory-confirmed Lot numbering/shift requirements and the selected Migration 003 model.
+The owner directed use of the existing OMAG database; Migration 003 is the canonical Product/Run/Lot design.
+Do not apply this draft or create these duplicate Product/Run/Lot tables. No data migration from this draft is required.
 No authoritative master seeds are included. Prototype code is mock-only and does not use this script.
 See docs/OmagMES_Schema_Implementation_Gate.md. Target host/configuration mismatch remains unresolved.
 */

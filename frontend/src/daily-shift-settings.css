@@ -1,0 +1,131 @@
+.daily-shift-settings {
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid #d5deea;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.daily-shift-settings-heading,
+.daily-shift-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.daily-shift-settings-heading h2 {
+  margin: 0;
+  color: #243348;
+  font-size: 16px;
+}
+
+.daily-shift-status {
+  color: #495c72;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.daily-shift-status.saved { color: #147247; }
+.daily-shift-status.default,
+.daily-shift-status.not-saved { color: #8a5a00; }
+.daily-shift-status.unavailable { color: #a4262c; }
+
+.daily-shift-table-wrap {
+  overflow-x: auto;
+  margin-top: 10px;
+}
+
+.daily-shift-table {
+  width: 100%;
+  min-width: 660px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.daily-shift-table th,
+.daily-shift-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid #e6ebf1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.daily-shift-table thead th {
+  color: #52657b;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.daily-shift-table tbody th { color: #243348; }
+
+.daily-shift-time {
+  width: 94px;
+  height: 28px;
+  min-height: 28px;
+  padding: 3px 6px;
+  border: 1px solid #c7d2df;
+  border-radius: 4px;
+  background: #fff;
+  color: #243348;
+  font: 12px/1.2 system-ui, sans-serif;
+}
+
+.daily-shift-settings-footer {
+  margin-top: 12px;
+  color: #52657b;
+  font-size: 12px;
+}
+
+.daily-shift-message {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.daily-shift-message.success { background: #edf8f1; color: #145a32; }
+.daily-shift-message.error { background: #fff0ef; color: #8d1b14; }
+
+.omagmes-header .shared-shift-control {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  color: #243348;
+  font: 500 9.75px/1.2 system-ui, sans-serif;
+  white-space: nowrap;
+}
+
+.omagmes-header .shared-shift-control select {
+  width: 92px;
+  height: 22.5px;
+  min-height: 0;
+  padding: 1px 4px;
+  border: 0.75px solid #c7d2df;
+  border-radius: 2.25px;
+  background: #fff;
+  color: #243348;
+  font: 400 9.75px/1.2 system-ui, sans-serif;
+}
+
+.omagmes-header .shared-shift-status {
+  min-width: 58px;
+  color: #52657b;
+  font: 700 8px/1.2 system-ui, sans-serif;
+}
+
+.omagmes-header .shared-shift-status.saved { color: #147247; }
+.omagmes-header .shared-shift-status.default,
+.omagmes-header .shared-shift-status.not-saved { color: #8a5a00; }
+.omagmes-header .shared-shift-status.unavailable { color: #a4262c; }
+
+@media (max-width: 620px) {
+  .daily-shift-settings-heading,
+  .daily-shift-settings-footer { align-items: flex-start; }
+  .daily-shift-settings-footer { flex-direction: column; }
+  .daily-shift-settings-footer button { width: 100%; }
+}

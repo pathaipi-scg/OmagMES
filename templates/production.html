@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div><p class="eyebrow">LIVE OPERATIONS · ASIA/BANGKOK</p><h1>Production</h1><p>Press and curing quantities require explicit operator confirmation before SQL SAVE.</p></div>
+  <form method="get" action="/" class="date-filter"><label for="production_date">Production Date</label><input id="production_date" name="production_date" type="date" value="{{ production_date }}" required><button class="button secondary">Load</button></form>
+</section>
+{% if not connected %}<section class="panel alert error" role="alert"><h2>Production SQL is unavailable</h2><p>{{ connection_error }}</p><p>No mock records are displayed or written.</p></section>{% endif %}
+{% if connected and schema_error %}<section class="panel alert warning" role="status"><h2>Production schema is incomplete</h2><p>{{ schema_error }}</p><p>Operational forms remain disabled until an authorized administrator deploys and verifies the reviewed schema.</p></section>{% endif %}
+{% if connected and writes_enabled %}<div class="alert warning" role="status">Operator labels are user-supplied and unverified; they are stored for audit context, not as authenticated identities.</div>{% endif %}
+{% if connected and writes_enabled and not lots %}<div class="panel empty"><h2>No production Lots are configured</h2><p>Load approved Product and standard master records, then create the first Lot through the reviewed SQL workflow. OmagMES will not create demo masters.</p></div>{% endif %}
+{% if connected %}
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">IMMUTABLE LOT IDENTITY</p><h2>Production Lots · {{ lots|length }}</h2></div><span class="tag">PRODUCT / COLOR CONTROLLED</span></div>
+  {% if writes_enabled and products %}<form method="post" action="/web/lots/create" class="form-grid">
+    <input type="hidden" name="production_date" value="{{ production_date }}"><input type="hidden" name="schedule_version_id" value="{{ schedule_version_id or '' }}">
+    <label>Previous open Lot · optional when starting production<select name="previous_lot_id"><option value="">No active Lot</option>{% for lot in lots if lot.is_open %}<option value="{{ lot.id }}">#{{ lot.id }} · {{ lot.lot_name }} · {{ lot.product_code }} · {{ lot.color }}</option>{% endfor %}</select></label>
+    <label>Product<select name="product_id" required><option value="">Select approved Product</option>{% for product in products if product.standard_pieces_per_drop and product.standard_cycle_time_sec %}<option value="{{ product.id }}">{{ product.code }} · {{ product.name }}</option>{% endfor %}</select></label>
+    <label>Coating Color<input name="color" maxlength="60" required></label><label>LotName · duplicates allowed<input name="lot_name" maxlength="120" required></label>
+    <label>Lot start · Bangkok<input name="started_at" type="datetime-local" step="60" value="{{ default_time }}" required></label><label>User-supplied operator label · unverified<input name="operator_id" maxlength="200" required></label>
+    <div class="wide"><p class="muted">A Product or Color change creates a new Lot ID. Continuing the same Product and Color retains the existing Lot ID. The server verifies active Product and approved standard data.</p><button class="button primary" type="submit" {% if not writes_enabled %}disabled{% endif %}>Confirm Product / Color &amp; Create Lot</button></div>
+  </form>{% else %}<p class="muted">Lot creation requires an active Product with an approved standard. No Product or standard data is seeded by OmagMES.</p>{% endif %}
+  {% if lots %}<div class="table-scroll top-gap"><table><thead><tr><th>Immutable ID</th><th>LotName</th><th>Product</th><th>Color</th><th>Started</th><th>Status</th><th>Rename</th></tr></thead><tbody>{% for lot in lots %}<tr><td>#{{ lot.id }}</td><td>{{ lot.lot_name }}</td><td>{{ lot.product_code }} · {{ lot.product_name }}</td><td>{{ lot.color }}</td><td>{{ lot.started_at }}</td><td>{{ 'OPEN' if lot.is_open else 'CLOSED' }}</td><td><details><summary>Edit LotName</summary><form method="post" action="/web/lots/{{ lot.id }}/rename" class="form-grid compact-form"><input type="hidden" name="production_date" value="{{ production_date }}"><label>New LotName<input name="new_name" maxlength="120" required></label><label>User-supplied operator label · unverified<input name="operator_id" maxlength="200" required></label><label class="wide">Change reason<input name="reason" maxlength="500" required></label><div class="wide"><button class="button secondary">Save audited rename</button></div></form></details></td></tr>{% endfor %}</tbody></table></div>{% endif %}
+</section>
+<div class="metrics-row">
+  <div class="metric"><span>PRESS DROPS · RESET-AWARE</span><strong>{{ '{:,}'.format(press_total) if press_total is not none else '—' }}</strong><small>Production Date total · SQL Diff view</small></div>
+  <div class="metric"><span>ACTIVE LOTS</span><strong>{{ lots|length }}</strong><small>Immutable ProductionLot IDs</small></div>
+  <div class="metric"><span>SAVED PRODUCTION ENTRIES</span><strong>{{ entries|length }}</strong><small>Persisted rows, latest first</small></div>
+</div>
+{% if press_error %}<p class="alert warning" role="status">Reset-aware Press Diff is unavailable: {{ press_error }}</p>{% endif %}
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">OPERATOR ENTRY</p><h2>Save production quantities</h2></div><span class="tag">SQL TRANSACTION</span></div>
+  {% if writes_enabled and lots %}
+  <form method="post" action="/web/production/save" class="form-grid">
+    <input type="hidden" name="production_date" value="{{ production_date }}">
+    <input type="hidden" name="schedule_version_id" value="{{ schedule_version_id or '' }}">
+    <label>Production Lot · select by immutable ID<select name="lot_id" required><option value="">Select Lot</option>{% for lot in lots %}<option value="{{ lot.id }}">#{{ lot.id }} · {{ lot.lot_name }} · {{ lot.product_code }} · {{ lot.color }}</option>{% endfor %}</select></label>
+    <label>Occurrence time · Bangkok<input name="production_at" type="datetime-local" step="60" value="{{ default_time }}" required></label>
+    <label>Press Drops<input name="actual_drops" type="number" min="0" step="1" required></label>
+    <label>Wet Good Pieces<input name="wet_good_pieces" type="number" min="0" step="1" required></label>
+    <label class="wide">User-supplied operator label · unverified<input name="operator_id" maxlength="200" required></label>
+    <label class="wide">Operator note<textarea name="operator_note" maxlength="1000" rows="2"></textarea></label>
+    <label class="confirm wide"><input type="checkbox" name="operator_confirmed" value="yes" required><span>I confirm these Press Drops and Wet Good Pieces against the production source before SAVE.</span></label>
+    <div class="wide"><button class="button primary" type="submit" {% if not writes_enabled %}disabled{% endif %}>Save Production Entry</button></div>
+  </form>
+  {% else %}<p class="muted">Production entry is unavailable until the required SQL schema and approved Lot data are ready.</p>{% endif %}
+</section>
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">DATABASE MASTER</p><h2>Curing quantity</h2></div><span class="tag">OPERATOR CONFIRMATION</span></div>
+  {% if writes_enabled and lots %}<form method="post" action="/web/curing/save" class="form-grid">
+    <input type="hidden" name="production_date" value="{{ production_date }}">
+    <label>Production Lot<select name="lot_id" required><option value="">Select Lot</option>{% for lot in lots %}<option value="{{ lot.id }}">#{{ lot.id }} · {{ lot.lot_name }} · {{ lot.product_code }} · {{ lot.color }}</option>{% endfor %}</select></label>
+    <label>Curing quantity<input name="quantity" type="number" min="0" step="1" required></label>
+    <label>Quantity unit<input name="unit_code" maxlength="40" required></label>
+    <label>User-supplied operator label · unverified<input name="operator_id" maxlength="200" required></label>
+    <label class="wide">Note<input name="note" maxlength="1000"></label>
+    <label class="confirm wide"><input type="checkbox" name="operator_confirmed" value="yes" required><span>I confirm the Curing quantity and unit before SAVE.</span></label>
+    <div class="wide"><button class="button primary" type="submit">Save Curing Entry</button></div>
+  </form>{% else %}<p class="muted">Curing SAVE is disabled until the required SQL schema and Lot data are ready.</p>{% endif %}
+</section>
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">SOURCE OF AUTHORITY</p><h2>Wet Reject reasons</h2></div><span class="tag">SQL MASTER</span></div>
+  {% if reject_reasons %}<form method="post" action="/web/reject/save" class="form-grid"><input type="hidden" name="production_date" value="{{ production_date }}"><label>Production Lot<select name="lot_id" required><option value="">Select Lot</option>{% for lot in lots %}<option value="{{ lot.id }}">#{{ lot.id }} · {{ lot.lot_name }} · {{ lot.product_code }} · {{ lot.color }}</option>{% endfor %}</select></label><label>User-supplied operator label · unverified<input name="operator_id" maxlength="200" required></label>{% for reason in reject_reasons %}<label>{{ reason.code }} · {{ reason.label }}<input type="number" name="reason_{{ reason.id }}" min="0" step="1" value="0" required></label>{% endfor %}<label class="wide">Note<input name="operator_note" maxlength="1000"></label><div class="wide"><button class="button primary" type="submit" {% if not writes_enabled or not lots %}disabled{% endif %}>Save Wet Reject Entries</button></div></form>{% else %}<p class="muted">No active Wet Reject reasons exist in the database master. No hardcoded/demo reason list is used.</p>{% endif %}
+</section>
+<section class="panel">
+  <div class="panel-heading"><div><p class="eyebrow">PRODUCT-OWNED TOOLING</p><h2>Mould register</h2></div><span class="tag">SQL MASTER</span></div>
+  {% if moulds %}<div class="table-scroll"><table><thead><tr><th>Mould ID</th><th>Mould</th><th>Product</th><th>Status</th><th>Current Drops</th><th>Lifetime Drops</th></tr></thead><tbody>{% for mould in moulds %}<tr><td>#{{ mould.id }}</td><td>{{ mould.code }} · {{ mould.name }}</td><td>{{ mould.product_code }}</td><td>{{ mould.status }}</td><td>{{ '{:,}'.format(mould.current_age_drops) }}</td><td>{{ '{:,}'.format(mould.lifetime_age_drops) }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="muted">No Moulds are configured. Each SQL Mould row references exactly one Product ID.</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

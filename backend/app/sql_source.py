@@ -4,21 +4,27 @@ import os
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
+from .production_plans import PLAN_VIEW_COLUMNS, aggregate_plan_rows
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 EXPECTED_SERVER = "10.28.255.98"
+EXPECTED_SERVER_NAME = "SCGLS-NK\\SQLEXPRESS"
 EXPECTED_DATABASE = "OMAG"
+EXPECTED_INSTANCE = "SQLEXPRESS"
+EXPECTED_SQL_LOGIN = "OMAG_MES"
 MAX_QUERY_ROWS = 5_000
 MAX_WINDOW_DAYS = 31
 COUNTER_TAG = re.compile(r"^MODBUS\.WET_REJECT\.cntR[0-9]+$")
+DROP_COUNTER_TAG = "OMAG.PRESS.OEE.DropCnt"
+SOURCE_PERMISSION_TABLES = ("dbo.PRESS", "dbo.REJECT_WET", "dbo.product_count")
 
 
 class SourceUnavailable(RuntimeError):
@@ -121,14 +127,14 @@ class SQLSourceSettings:
             return errors
         if not self.target_confirmed:
             errors.append("Owner confirmation of the exact SQL Server instance and OMAG database is required.")
-        if not self.select_only_confirmed:
-            errors.append("DBA confirmation of SELECT-only source permissions is required.")
-        if not re.fullmatch(r"10\.28\.255\.98(?:\\[A-Za-z0-9_.-]+)?(?:,\d{1,5})?", self.server):
-            errors.append(f"Configured SQL server must match the approved host {EXPECTED_SERVER}.")
+        if not re.fullmatch(r"(?:127\.0\.0\.1|localhost|10\.28\.255\.98)(?:\\[A-Za-z0-9_.-]+)?(?:,\d{1,5})?", self.server, re.IGNORECASE):
+            errors.append("Configured SQL server must use the approved local endpoint or OMAG SQL host.")
         if self.database.casefold() != EXPECTED_DATABASE.casefold():
             errors.append("Configured database must be OMAG.")
         if not self.username or not self.password:
             errors.append("SQL credentials are not configured in the local environment.")
+        elif self.username.casefold() != EXPECTED_SQL_LOGIN.casefold():
+            errors.append(f"SQL source must use the dedicated {EXPECTED_SQL_LOGIN} login; fallback identities are refused.")
         if not self.driver:
             errors.append("SQL_DRIVER is not configured.")
         return errors
@@ -147,6 +153,7 @@ class SQLServerReadOnlyRepository:
     ) -> None:
         self.settings = settings or SQLSourceSettings.from_environment()
         self._connect_factory = connect_factory
+        self._last_preflight: dict[str, Any] | None = None
 
     def _connection_string(self) -> str:
         settings = self.settings
@@ -174,7 +181,7 @@ class SQLServerReadOnlyRepository:
         )
 
     @contextmanager
-    def _connection(self) -> Iterator[Any]:
+    def _connection(self, permission_tables: Sequence[str] = SOURCE_PERMISSION_TABLES) -> Iterator[Any]:
         errors = self.settings.live_gate_errors()
         if errors:
             raise SourceUnavailable(" ".join(errors))
@@ -198,7 +205,7 @@ class SQLServerReadOnlyRepository:
         except Exception as exc:
             raise SourceUnavailable(f"SQL source connection failed ({type(exc).__name__}).") from None
         try:
-            self._verify_connection(connection)
+            self._last_preflight = self._verify_connection(connection, permission_tables)
         except SourceUnavailable:
             connection.close()
             raise
@@ -210,44 +217,86 @@ class SQLServerReadOnlyRepository:
         finally:
             connection.close()
 
-    def _verify_connection(self, connection: Any) -> dict[str, Any]:
+    def _verify_connection(
+        self,
+        connection: Any,
+        permission_tables: Sequence[str] = SOURCE_PERMISSION_TABLES,
+    ) -> dict[str, Any]:
         connection.timeout = self.settings.query_timeout
         cursor = connection.cursor()
-        cursor.execute(
-            """SELECT @@SERVERNAME AS server_name,
+        self._execute_select(
+            cursor,
+            """SELECT ORIGINAL_LOGIN() AS original_login,
+                      SUSER_SNAME() AS sql_login,
+                      @@SERVERNAME AS server_name,
                       DB_NAME() AS database_name,
-                      CAST(SERVERPROPERTY('InstanceName') AS nvarchar(128)) AS instance_name"""
+                      CAST(SERVERPROPERTY('InstanceName') AS nvarchar(128)) AS instance_name,
+                      USER_NAME() AS database_user,
+                      IS_SRVROLEMEMBER('sysadmin') AS is_sysadmin""",
         )
         row = cursor.fetchone()
         if row is None:
             raise SourceUnavailable("SQL target identity could not be verified.")
-        server_name, database_name, instance_name = row[0], row[1], row[2]
+        original_login, sql_login, server_name, database_name, instance_name = row[0], row[1], row[2], row[3], row[4]
+        if str(original_login or "").casefold() != EXPECTED_SQL_LOGIN.casefold() or str(sql_login or "").casefold() != EXPECTED_SQL_LOGIN.casefold():
+            raise SourceUnavailable(f"Connected SQL identity must be {EXPECTED_SQL_LOGIN}; fallback identities are refused.")
         if str(database_name).casefold() != EXPECTED_DATABASE.casefold():
             raise SourceUnavailable("Connected database is not the approved OMAG database.")
+        if str(server_name or "").casefold() != EXPECTED_SERVER_NAME.casefold():
+            raise SourceUnavailable("Connected SQL Server name does not match the owner-confirmed OMAG server.")
         configured_instance = self.settings.server.partition("\\")[2].split(",", 1)[0] or None
         actual_instance = str(instance_name) if instance_name is not None else None
-        if configured_instance != actual_instance:
+        if actual_instance != EXPECTED_INSTANCE or (configured_instance and configured_instance.casefold() != actual_instance.casefold()):
             raise SourceUnavailable("Connected SQL Server instance does not match the confirmed instance in SQL_SERVER.")
 
-        object_names = ("dbo.PRESS", "dbo.REJECT_WET", "dbo.product_count")
         permission_sql = "SELECT " + ", ".join(
             f"HAS_PERMS_BY_NAME(?, 'OBJECT', '{permission}')"
             for permission in ("SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL")
         )
-        for object_name in object_names:
-            cursor.execute(permission_sql, (object_name,) * 6)
+        permission_results: dict[str, dict[str, bool]] = {}
+        write_capabilities = ("INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL")
+        for object_name in permission_tables:
+            self._execute_select(cursor, permission_sql, (object_name,) * 6)
             permissions = cursor.fetchone()
-            if permissions is None or permissions[0] != 1 or any(value == 1 for value in permissions[1:]):
-                raise SourceUnavailable("The SQL login does not have verified SELECT-only access to all required source tables.")
-            if any(value is None for value in permissions):
+            if permissions is None or any(value is None for value in permissions):
                 raise SourceUnavailable("SQL permissions for a required source table could not be verified.")
+            if permissions[0] != 1:
+                raise SourceUnavailable(f"The SQL login does not have SELECT permission on {object_name}.")
+            permission_results[object_name] = {
+                permission: value == 1
+                for permission, value in zip(("SELECT", *write_capabilities), permissions)
+            }
+
+        writes_present = sorted({
+            permission
+            for permissions in permission_results.values()
+            for permission in write_capabilities
+            if permissions[permission]
+        })
 
         return {
             "server": str(server_name or ""),
             "instance": str(instance_name) if instance_name is not None else None,
             "database": str(database_name),
-            "read_only_permissions_verified": True,
+            "original_login": str(original_login or ""),
+            "sql_login": str(sql_login or ""),
+            "database_user": str(row[5] or ""),
+            "sysadmin_member": row[6] == 1,
+            "permission_checks": permission_results,
+            "select_access_verified": True,
+            "read_only_permissions_verified": not writes_present and row[5] != 1,
+            "write_capabilities_present": writes_present,
+            "source_queries_select_only_enforced": True,
         }
+
+    @staticmethod
+    def _execute_select(cursor: Any, sql: str, params: Sequence[Any] = ()) -> Any:
+        """Execute a SELECT statement only; source-repository DML is forbidden in code."""
+        executable_sql = re.sub(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|--[^\r\n]*|/\*.*?\*/", " ", sql, flags=re.DOTALL)
+        forbidden = re.compile(r"\b(?:INSERT|UPDATE|DELETE|MERGE|ALTER|DROP|TRUNCATE|EXEC(?:UTE)?|CREATE)\b", re.IGNORECASE)
+        if not executable_sql.lstrip().upper().startswith("SELECT") or ";" in executable_sql or forbidden.search(executable_sql):
+            raise SourceUnavailable("Source repository permits SELECT statements only.")
+        return cursor.execute(sql, tuple(params))
 
     def health(self) -> dict[str, Any]:
         if not self.settings.live_requested:
@@ -258,19 +307,13 @@ class SQLServerReadOnlyRepository:
                 "instance": None,
                 "database": None,
                 "read_only_permissions_verified": False,
+                "select_access_verified": False,
+                "source_queries_select_only_enforced": True,
                 "error": "Live read-only source mode is not enabled.",
             }
         try:
-            with self._connection() as connection:
-                cursor = self._cursor(connection)
-                cursor.execute("SELECT @@SERVERNAME, DB_NAME(), CAST(SERVERPROPERTY('InstanceName') AS nvarchar(128))")
-                row = cursor.fetchone()
-                identity = {
-                    "server": str(row[0] or ""),
-                    "instance": str(row[2]) if row[2] is not None else None,
-                    "database": str(row[1]),
-                    "read_only_permissions_verified": True,
-                }
+            with self._connection(permission_tables=("dbo.PRESS",)) as connection:
+                identity = dict(self._last_preflight or {})
             return {"mode": self.settings.safe_mode_name, "connected": True, **identity, "error": None}
         except SourceUnavailable as exc:
             return {
@@ -280,6 +323,8 @@ class SQLServerReadOnlyRepository:
                 "instance": None,
                 "database": None,
                 "read_only_permissions_verified": False,
+                "select_access_verified": False,
+                "source_queries_select_only_enforced": True,
                 "error": str(exc),
             }
         except Exception as exc:
@@ -290,6 +335,8 @@ class SQLServerReadOnlyRepository:
                 "instance": None,
                 "database": None,
                 "read_only_permissions_verified": False,
+                "select_access_verified": False,
+                "source_queries_select_only_enforced": True,
                 "error": f"SQL source preflight failed ({type(exc).__name__}).",
             }
 
@@ -300,7 +347,8 @@ class SQLServerReadOnlyRepository:
 
     def _table_columns(self, connection: Any, table_name: str) -> list[str]:
         cursor = self._cursor(connection)
-        cursor.execute(
+        self._execute_select(
+            cursor,
             "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
             ("dbo", table_name),
         )
@@ -309,7 +357,7 @@ class SQLServerReadOnlyRepository:
     def historian_metadata(self, table_name: str) -> list[str]:
         if table_name not in {"PRESS", "REJECT_WET", "product_count"}:
             raise ValueError("Only the approved read-only source table names are supported.")
-        with self._connection() as connection:
+        with self._connection(permission_tables=(f"dbo.{table_name}",)) as connection:
             return self._table_columns(connection, table_name)
 
     @staticmethod
@@ -337,8 +385,8 @@ class SQLServerReadOnlyRepository:
         if not 1 <= limit <= MAX_QUERY_ROWS:
             raise ValueError(f"limit must be between 1 and {MAX_QUERY_ROWS}.")
 
-    def _source_naive_timestamp(self, value: datetime) -> datetime:
-        if not self.settings.source_timezone_confirmed or not self.settings.source_timezone:
+    def _source_naive_timestamp(self, value: datetime, *, require_confirmation: bool = True) -> datetime:
+        if not self.settings.source_timezone or (require_confirmation and not self.settings.source_timezone_confirmed):
             raise SourceUnavailable("Source timestamp timezone is not verified; bounded production queries are disabled.")
         try:
             zone = ZoneInfo(self.settings.source_timezone)
@@ -352,7 +400,7 @@ class SQLServerReadOnlyRepository:
             f"SELECT TOP (?) id, _NAME, _VALUE, _TIMESTAMP, _QUALITY FROM {table} "
             f"WHERE {tag_filter_sql} ORDER BY _TIMESTAMP {order}, id {order}"
         )
-        with self._connection() as connection:
+        with self._connection(permission_tables=(f"dbo.{table_name}",)) as connection:
             columns = set(self._table_columns(connection, table_name))
             required = {"id", "_NAME", "_VALUE", "_TIMESTAMP", "_QUALITY"}
             if not required.issubset(columns):
@@ -360,7 +408,7 @@ class SQLServerReadOnlyRepository:
             if not self.settings.historian_metadata_reviewed:
                 raise SourceUnavailable("PRESS/REJECT_WET metadata has not been reviewed; historian row queries are disabled.")
             cursor = self._cursor(connection)
-            cursor.execute(sql, (limit, *params))
+            self._execute_select(cursor, sql, (limit, *params))
             return [self._row_dict(cursor, row) for row in cursor.fetchall()]
 
     def latest_wet_status(self) -> dict[str, Any]:
@@ -396,6 +444,58 @@ class SQLServerReadOnlyRepository:
             limit,
         )
 
+    def dropcnt_observations(self, start_at: datetime, end_at: datetime, limit: int) -> list[dict[str, Any]]:
+        """Read only the exact DropCnt historian tag for one bounded time window."""
+        self._validate_range(start_at, end_at, limit)
+        return self._fetch_press(
+            "dbo.PRESS",
+            "_NAME = ? AND _TIMESTAMP >= ? AND _TIMESTAMP < ?",
+            (DROP_COUNTER_TAG, self._source_naive_timestamp(start_at, require_confirmation=False), self._source_naive_timestamp(end_at, require_confirmation=False)),
+            "ASC",
+            limit,
+        )
+
+    def press_activity_observations(self, start_at: datetime, end_at: datetime, limit: int = MAX_QUERY_ROWS) -> dict[str, Any]:
+        """Read both reviewed production activity tags for one complete bounded day.
+
+        Results use source event order (_TIMESTAMP,id) and include _NUMERICID
+        and _QUALITY for audit/review. Unconfirmed historian timestamps are
+        compared as raw SQL wall-clock values; no timezone conversion is guessed.
+        """
+        self._validate_range(start_at, end_at, limit)
+        columns = set(self.historian_metadata("PRESS"))
+        required = {"id", "_NAME", "_NUMERICID", "_VALUE", "_TIMESTAMP", "_QUALITY"}
+        if not required.issubset(columns):
+            missing = sorted(required - columns)
+            raise SourceUnavailable("dbo.PRESS does not expose the reviewed activity columns: " + ", ".join(missing) + ".")
+        if not self.settings.historian_metadata_reviewed:
+            raise SourceUnavailable("PRESS metadata has not been reviewed; historian row queries are disabled.")
+        if self.settings.source_timezone_confirmed:
+            start_value = self._source_naive_timestamp(start_at)
+            end_value = self._source_naive_timestamp(end_at)
+            timestamp_basis = self.settings.source_timezone
+        else:
+            start_value = start_at.replace(tzinfo=None)
+            end_value = end_at.replace(tzinfo=None)
+            timestamp_basis = "RAW SQL WALL CLOCK · UNVERIFIED"
+        sql = (
+            "SELECT TOP (?) [id],[_NAME],[_NUMERICID],[_VALUE],[_TIMESTAMP],[_QUALITY] "
+            "FROM dbo.PRESS WHERE [_NAME] IN (?,?) AND [_TIMESTAMP]>=? AND [_TIMESTAMP]<? "
+            "ORDER BY [_TIMESTAMP] ASC,[id] ASC"
+        )
+        with self._connection(permission_tables=("dbo.PRESS",)) as connection:
+            cursor = self._cursor(connection)
+            self._execute_select(cursor, sql, (limit + 1, "OMAG.PRESS.OEE.DropCnt", "OMAG.PRESS.OEE.AutoRun", start_value, end_value))
+            rows = [self._row_dict(cursor, row) for row in cursor.fetchall()]
+        truncated = len(rows) > limit
+        return {
+            "observations": rows[:limit], "truncated": truncated, "limit": limit,
+            "timestamp_basis": timestamp_basis,
+            "source": "OMAG.dbo.PRESS",
+            "tags": [DROP_COUNTER_TAG, "OMAG.PRESS.OEE.AutoRun"],
+            "order": ["_TIMESTAMP", "id"],
+        }
+
     def wet_reject_observations(self, start_at: datetime, end_at: datetime, limit: int) -> list[dict[str, Any]]:
         self._validate_range(start_at, end_at, limit)
         rows = self._fetch_press(
@@ -430,7 +530,7 @@ class SQLServerReadOnlyRepository:
         return [latest[tag] for tag in sorted(latest, key=lambda value: int(value.rsplit("cntR", 1)[1]))]
 
     def camera_metadata(self) -> list[str]:
-        with self._connection() as connection:
+        with self._connection(permission_tables=("dbo.product_count",)) as connection:
             return self._table_columns(connection, "product_count")
 
     def wet_camera_observations(self, start_at: datetime, end_at: datetime, limit: int) -> list[dict[str, Any]]:
@@ -461,9 +561,9 @@ class SQLServerReadOnlyRepository:
             f"WHERE [line] = ? AND {timestamp_column} >= ? AND {timestamp_column} < ? "
             f"ORDER BY {timestamp_column} ASC, {identifier(settings.camera_id_column)} ASC"
         )
-        with self._connection() as connection:
+        with self._connection(permission_tables=("dbo.product_count",)) as connection:
             cursor = self._cursor(connection)
-            cursor.execute(sql, (limit, "wet", self._source_naive_timestamp(start_at), self._source_naive_timestamp(end_at)))
+            self._execute_select(cursor, sql, (limit, "wet", self._source_naive_timestamp(start_at), self._source_naive_timestamp(end_at)))
             rows = [self._row_dict(cursor, row) for row in cursor.fetchall()]
 
         return [
@@ -477,6 +577,204 @@ class SQLServerReadOnlyRepository:
             }
             for row in rows
         ]
+
+    def production_plan_snapshots(self, limit: int = 1000, production_date: str | None = None) -> dict[str, Any]:
+        """Read the existing production-plan view; never access its synonym directly."""
+        if not 1 <= limit <= MAX_QUERY_ROWS:
+            raise ValueError(f"limit must be between 1 and {MAX_QUERY_ROWS}.")
+        start_date = None
+        end_date = None
+        if production_date is not None:
+            try:
+                start_date = date.fromisoformat(production_date)
+            except ValueError:
+                raise ValueError("production_date must use YYYY-MM-DD format.") from None
+            if start_date.isoformat() != production_date:
+                raise ValueError("production_date must use YYYY-MM-DD format.")
+            end_date = start_date + timedelta(days=1)
+        with self._connection(permission_tables=("dbo.vw_OmagPlan",)) as connection:
+            columns = set(self._table_columns(connection, "vw_OmagPlan"))
+            if not set(PLAN_VIEW_COLUMNS).issubset(columns):
+                missing = sorted(set(PLAN_VIEW_COLUMNS) - columns)
+                raise SourceUnavailable(f"dbo.vw_OmagPlan column metadata differs from the reviewed source contract; missing columns: {', '.join(missing)}.")
+            cursor = self._cursor(connection)
+            projection = ",".join(f"[{column}]" for column in PLAN_VIEW_COLUMNS)
+            order = ",".join(f"[{column}]" for column in ("StartTime", "Company", "Plant", "Shift", "PlanWeek", "VersionNo", "PlanName", "Machine", "MaterialCode", "OperationCode"))
+            date_filter = " AND [StartTime] >= ? AND [StartTime] < ?" if start_date is not None else ""
+            params: tuple[Any, ...] = (limit + 1, "SCGLS", "OMAG", "3251")
+            if start_date is not None and end_date is not None:
+                params += (start_date, end_date)
+            self._execute_select(
+                cursor,
+                f"SELECT TOP (?) {projection} FROM dbo.vw_OmagPlan "
+                f"WHERE [Company] = ? AND [Machine] = ? AND [Plant] = ?{date_filter} ORDER BY {order}",
+                params,
+            )
+            raw_rows = [self._row_dict(cursor, row) for row in cursor.fetchall()]
+        truncated = len(raw_rows) > limit
+        plans = aggregate_plan_rows(raw_rows[:limit])
+        return {
+            "source": "OMAG.dbo.vw_OmagPlan",
+            "filters": {"Company": "SCGLS", "Machine": "OMAG", "Plant": "3251"},
+            "production_date": production_date,
+            "plans": plans,
+            "truncated": truncated,
+            "limit": limit,
+            "identity_kind": "CONTENT_FINGERPRINT_NOT_SOURCE_ID",
+            "warnings": [
+                "The plan view exposes no durable row ID; identical rows cannot be distinguished and are not assignable.",
+                "Planned StartTime is display/scheduling context only and is never copied into actual Lot boundaries.",
+                "MaterialCode is matched exactly to ProductCode; it is never interpreted as a coating Color.",
+            ],
+        }
+
+    def press_lot_auto(self, production_date: str, limit: int = MAX_QUERY_ROWS) -> dict[str, Any]:
+        """Read the SQL-generated AutoLot business rows for one source ProdDate."""
+        try:
+            parsed_date = date.fromisoformat(production_date)
+        except ValueError:
+            raise ValueError("production_date must use YYYY-MM-DD format.") from None
+        if parsed_date.isoformat() != production_date:
+            raise ValueError("production_date must use YYYY-MM-DD format.")
+        if not 1 <= limit <= MAX_QUERY_ROWS:
+            raise ValueError(f"limit must be between 1 and {MAX_QUERY_ROWS}.")
+        required = {
+            "ProdDate", "ShiftType", "LotNo", "rw", "LotStart", "LotStop",
+            "ShiftNo", "StartTime", "StopTime", "pDropCnt", "DropCnt",
+        }
+        with self._connection(permission_tables=("dbo.vw_PRESS_LotAuto",)) as connection:
+            columns = set(self._table_columns(connection, "vw_PRESS_LotAuto"))
+            if not required.issubset(columns):
+                missing = sorted(required - columns)
+                raise SourceUnavailable(
+                    "dbo.vw_PRESS_LotAuto differs from the reviewed AutoLot contract; missing columns: "
+                    + ", ".join(missing) + "."
+                )
+            cursor = self._cursor(connection)
+            self._execute_select(
+                cursor,
+                "SELECT TOP (?) ProdDate,ShiftType,LotNo,rw,LotStart,LotStop,"
+                "ShiftNo,StartTime,StopTime,pDropCnt,DropCnt "
+                "FROM dbo.vw_PRESS_LotAuto WHERE ProdDate=? "
+                "ORDER BY LotStart,LotNo,rw",
+                (limit + 1, parsed_date),
+            )
+            rows = [self._row_dict(cursor, row) for row in cursor.fetchall()]
+        if len(rows) > limit:
+            raise SourceUnavailable(
+                "vw_PRESS_LotAuto exceeded the bounded reconciliation row limit; no partial AutoLot reconciliation was performed."
+            )
+        return {
+            "source": "OMAG.dbo.vw_PRESS_LotAuto",
+            "production_date": production_date,
+            "rows": rows,
+            "truncated": False,
+            "limit": limit,
+            "identity_strategy": "Direct current dbo.vw_PRESS_LotAuto columns; LotNo, ShiftNo, and DropCnt are SQL-owned.",
+        }
+
+    def press_daily_diff_total(self, production_date: str) -> dict[str, Any]:
+        """Sum the installed reset-aware SQL Diff view for one configured Production Date."""
+        try:
+            parsed_date = datetime.fromisoformat(production_date).date()
+        except ValueError:
+            raise ValueError("production_date must use YYYY-MM-DD format.") from None
+        if parsed_date.isoformat() != production_date:
+            raise ValueError("production_date must use YYYY-MM-DD format.")
+        with self._connection(permission_tables=("omagmes.v_PressDailyDiff",)) as connection:
+            cursor = self._cursor(connection)
+            self._execute_select(
+                cursor,
+                "SELECT COALESCE(SUM(CONVERT(bigint,Diff)),0),COUNT_BIG(*) "
+                "FROM omagmes.v_PressDailyDiff WHERE ProductionDate=? AND SourceTag=? AND Diff>=0",
+                (parsed_date, DROP_COUNTER_TAG),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise SourceUnavailable("Reset-aware Press Diff summary returned no result.")
+        return {"production_date": production_date, "press_drops": int(row[0]), "sample_count": int(row[1]),
+                "source": "OMAG.omagmes.v_PressDailyDiff", "counter_tag": DROP_COUNTER_TAG,
+                "reset_aware": True}
+
+    def auto_lot_detected_windows(self, production_date: str | None = None, limit: int = 1000) -> dict[str, Any]:
+        """Read SQL-derived counter epochs as provisional proposals, not Lot facts."""
+        if not 1 <= limit <= MAX_QUERY_ROWS:
+            raise ValueError(f"limit must be between 1 and {MAX_QUERY_ROWS}.")
+        sql = (
+            "SELECT TOP (?) CandidateKey,SourceTag,CounterEpoch,FirstSourceID,ResetSourceID,ResetPreviousSourceID,ResetValue,ResetPreviousValue,"
+            "ProposedStartTime,ProposedEndTime,BoundaryEvidence,BoundaryEarliestEvidenceAt,BoundaryLatestEvidenceAt,"
+            "ProductionDate,CutoffVersionID,ShiftScheduleVersionID,ShiftID,RequiresOperatorConfirmation,IsProvisional,DetectionNote "
+            "FROM omagmes.v_AutoLotDetectedWindow "
+        )
+        params: tuple[Any, ...] = (limit + 1,)
+        if production_date is not None:
+            parse_date = datetime.fromisoformat(production_date).date()
+            if parse_date.isoformat() != production_date:
+                raise ValueError("production_date must use YYYY-MM-DD format.")
+            sql += "WHERE ProductionDate=? "
+            params += (parse_date,)
+        sql += "ORDER BY ProposedStartTime DESC,FirstSourceID DESC"
+        with self._connection(permission_tables=("omagmes.v_AutoLotDetectedWindow",)) as connection:
+            cursor = self._cursor(connection)
+            self._execute_select(cursor, sql, params)
+            rows = [self._row_dict(cursor, row) for row in cursor.fetchall()]
+        truncated = len(rows) > limit
+        return {
+            "source": "OMAG.omagmes.v_AutoLotDetectedWindow",
+            "rows": rows[:limit],
+            "truncated": truncated,
+            "limit": limit,
+            "warning": "Counter epochs are provisional evidence. They do not prove Product/Color change, actual start/stop, or create official ProductionLots.",
+        }
+
+    def press_lot_summary(self, production_date: str | None = None, limit: int = MAX_QUERY_ROWS) -> list[dict[str, Any]]:
+        """Read the shared SQL Lot summary view; never calculate Diff/ACC in Python."""
+        if not 1 <= limit <= MAX_QUERY_ROWS:
+            raise ValueError(f"limit must be between 1 and {MAX_QUERY_ROWS}.")
+        sql = (
+            "SELECT TOP (?) LotIdentityType,LotIdentityID,OfficialProductionLotID,CandidateWindowID,"
+            "LotNumber,LotStatus,LotName,ProductID,ColorCode,StartTime,EndTime,"
+            "OriginalProposedStartTime,OriginalProposedEndTime,CurrentProposedStartTime,CurrentProposedEndTime,OperatorTimeOverride,"
+            "ProductionDate,ShiftID,"
+            "CalculatedPressQty,LatestLotACC,LatestDiffAt,AmbiguousEventCount,BoundaryOverlapEventCount,QualityWarningCount,"
+            "ResetEventCount,HasDataWarnings FROM omagmes.v_PressLotSummary "
+        )
+        params: tuple[Any, ...] = (limit + 1,)
+        if production_date is not None:
+            sql += "WHERE ProductionDate=? "
+            params += (production_date,)
+        sql += "ORDER BY StartTime DESC,LotIdentityType,LotIdentityID"
+        with self._connection(permission_tables=("omagmes.v_PressLotSummary",)) as connection:
+            cursor = self._cursor(connection)
+            self._execute_select(cursor, sql, params)
+            rows = [self._row_dict(cursor, row) for row in cursor.fetchall()]
+        if len(rows) > limit:
+            raise SourceUnavailable("SQL Lot summary exceeded the approved row limit; narrow the Production Date query.")
+        return rows
+
+    def press_lot_acc(self, start_at: datetime, end_at: datetime, limit: int = MAX_QUERY_ROWS) -> list[dict[str, Any]]:
+        """Read SQL-calculated Lot Diff/ACC events for a bounded time interval."""
+        self._validate_range(start_at, end_at, limit)
+        sql = (
+            "SELECT TOP (?) SourceID,RecTime,DiffProductionDate,QualityCode,PreviousSourceID,PreviousRecTime,"
+            "CounterValue,PreviousCounterValue,ResetDetected,Unchanged,Diff,DiffStatus,LotIdentityType,"
+            "LotIdentityID,ProductionLotID,CandidateWindowID,LotNumber,LotStatus,StartTime,EndTime,ProductID,"
+            "ColorCode,AllocationStatus,IsAllocated,EligibleDiff,AllocatedDiff,UnallocatedOrAmbiguousDiff,LotACC "
+            "FROM omagmes.v_PressLotACC WHERE RecTime>=? AND RecTime<? "
+            "ORDER BY RecTime,SourceID"
+        )
+        params = (
+            limit + 1,
+            self._source_naive_timestamp(start_at, require_confirmation=False),
+            self._source_naive_timestamp(end_at, require_confirmation=False),
+        )
+        with self._connection(permission_tables=("omagmes.v_PressLotACC",)) as connection:
+            cursor = self._cursor(connection)
+            self._execute_select(cursor, sql, params)
+            rows = [self._row_dict(cursor, row) for row in cursor.fetchall()]
+        if len(rows) > limit:
+            raise SourceUnavailable("SQL Lot ACC query exceeded the approved row limit; narrow the time interval.")
+        return rows
 
 
 repository = SQLServerReadOnlyRepository()
